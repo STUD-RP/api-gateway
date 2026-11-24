@@ -1,0 +1,346 @@
+openapi: 3.1.0
+info:
+  title: STUD'RP MONEY — Paiements
+  version: 1.0.0-draft
+  summary: Paiements en ligne et TPE via SumUp, partage association / STUD'RP.
+  description: |
+    **Service maître** des paiements. Seul service qui parle à SumUp
+    ([API REST SumUp](https://developer.sumup.com/rest-api/)). Pas de front.
+
+    - Appelé par : STUD (cotisation, rechargement en ligne), RMS (paiement TPE).
+    - Appelle : ADMIN (`GET /v1/internal/associations/{association}/bank-settings`).
+    - Événements émis : `payment.succeeded`, `payment.failed`, `payment.refunded`.
+    - Événements reçus : `association.*`.
+
+    **Partage** : chaque paiement réussi porte un `split`.
+    `platformAmountCents = floor(amountCents × commissionRate)`,
+    `associationAmountCents = amountCents − platformAmountCents`.
+    Le taux vient d'ADMIN, jamais codé en dur. Si SumUp ne permet pas deux paiements
+    distincts, l'argent arrive chez l'association et le `split` sert au suivi
+    de la commission (point à valider, voir le document de stratégie).
+
+    Aucun numéro de carte ne transite par STUD'RP : SumUp gère la saisie.
+servers:
+  - url: https://api.studrp.example/api/money
+    description: Via la gateway
+  - url: http://localhost:3005
+    description: Développement local
+security:
+  - serviceApiKey: []
+tags:
+  - name: Paiements
+    description: Création, suivi et remboursement des paiements.
+  - name: Fournisseur
+    description: Notifications entrantes de SumUp.
+  - name: Webhooks
+    description: Réception des événements poussés par la gateway.
+  - name: Santé
+paths:
+  /health:
+    get:
+      tags: [Santé]
+      operationId: getMoneyHealth
+      summary: État du service
+      description: Utilisé par `GET /api/health` de la gateway. Indique aussi si SumUp répond.
+      security: []
+      responses:
+        '200':
+          description: Service opérationnel.
+          content:
+            application/json:
+              schema: { $ref: './common/schemas.yaml#/components/schemas/Health' }
+              example: { status: UP, service: money, version: 1.0.0 }
+
+  /v1/associations/{association}/payments:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Paiements]
+      operationId: listPayments
+      summary: Lister les paiements
+      description: Pour les rapprochements et la démo. Rôles `SERVICE`, `BUREAU`, `STUDRP_ADMIN`.
+      security:
+        - serviceApiKey: []
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: './common/schemas.yaml#/components/schemas/PaymentStatus' }
+        - name: purpose
+          in: query
+          schema: { $ref: './common/schemas.yaml#/components/schemas/PaymentPurpose' }
+        - $ref: './common/schemas.yaml#/components/parameters/From'
+        - $ref: './common/schemas.yaml#/components/parameters/To'
+        - $ref: './common/schemas.yaml#/components/parameters/Page'
+        - $ref: './common/schemas.yaml#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page de paiements.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PaymentPage' }
+              example:
+                data:
+                  - paymentId: 6f7a8b9c-0d1e-4f2a-9b3c-4d5e6f7a8b9c
+                    purpose: MEMBERSHIP
+                    method: ONLINE
+                    status: SUCCEEDED
+                    amountCents: 1100
+                    split: { commissionRate: 0.045, associationAmountCents: 1051, platformAmountCents: 49 }
+                    studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+                    reference: { kind: MEMBERSHIP, id: 5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b }
+                    providerTransactionId: TX-SUMUP-8841
+                    createdAt: '2026-09-15T08:28:00Z'
+                    completedAt: '2026-09-15T08:30:00Z'
+                pagination: { page: 1, pageSize: 20, totalItems: 1, totalPages: 1 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+    post:
+      tags: [Paiements]
+      operationId: createPayment
+      summary: Créer un paiement
+      description: |
+        - `method: ONLINE` (STUD) → crée un checkout SumUp et renvoie `checkoutUrl` où rediriger l'étudiant.
+        - `method: CARD_TERMINAL` (RMS) → envoie le montant au TPE SumUp de l'association.
+
+        Le paiement démarre en `PENDING`. Son issue arrive par `payment.succeeded` ou
+        `payment.failed`, et se lit aussi par `GET /payments/{paymentId}`.
+        Rôle `SERVICE` (stud, rms).
+      parameters:
+        - $ref: './common/schemas.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PaymentCreate' }
+            examples:
+              cotisation:
+                summary: Cotisation annuelle en ligne (depuis STUD)
+                value:
+                  purpose: MEMBERSHIP
+                  method: ONLINE
+                  amountCents: 1100
+                  studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+                  reference: { kind: MEMBERSHIP, id: 5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b }
+                  description: Cotisation CNAMUS 2026-2027
+                  returnUrl: https://cnamus.studrp.example/adhesion
+              tpe:
+                summary: Paiement TPE en caisse (depuis RMS)
+                value:
+                  purpose: SALE
+                  method: CARD_TERMINAL
+                  amountCents: 200
+                  studentId: null
+                  reference: { kind: SALE, id: 0b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e }
+                  description: Soirée d'intégration 2026, 2 jus d'orange
+      responses:
+        '201':
+          description: Paiement créé, en attente.
+          headers:
+            Location: { $ref: './common/schemas.yaml#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+              examples:
+                cotisation:
+                  value:
+                    paymentId: 6f7a8b9c-0d1e-4f2a-9b3c-4d5e6f7a8b9c
+                    purpose: MEMBERSHIP
+                    method: ONLINE
+                    status: PENDING
+                    amountCents: 1100
+                    split: { commissionRate: 0.045, associationAmountCents: 1051, platformAmountCents: 49 }
+                    studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+                    reference: { kind: MEMBERSHIP, id: 5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b }
+                    checkoutUrl: https://checkout.sumup.example/pay/def456
+                    createdAt: '2026-09-15T08:28:00Z'
+                tpe:
+                  value:
+                    paymentId: 3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f
+                    purpose: SALE
+                    method: CARD_TERMINAL
+                    status: PENDING
+                    amountCents: 200
+                    split: { commissionRate: 0.045, associationAmountCents: 191, platformAmountCents: 9 }
+                    studentId: null
+                    reference: { kind: SALE, id: 0b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e }
+                    createdAt: '2026-11-21T21:15:00Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '409': { $ref: './common/schemas.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/payments/{paymentId}:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: '#/components/parameters/PaymentId'
+    get:
+      tags: [Paiements]
+      operationId: getPayment
+      summary: Lire un paiement
+      description: RMS interroge cette route toutes les 2 s pendant un paiement TPE.
+      responses:
+        '200':
+          description: Le paiement.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+              example:
+                paymentId: 3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f
+                purpose: SALE
+                method: CARD_TERMINAL
+                status: SUCCEEDED
+                amountCents: 200
+                split: { commissionRate: 0.045, associationAmountCents: 191, platformAmountCents: 9 }
+                studentId: null
+                reference: { kind: SALE, id: 0b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e }
+                providerTransactionId: TX-SUMUP-9902
+                createdAt: '2026-11-21T21:15:00Z'
+                completedAt: '2026-11-21T21:15:20Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+
+  /v1/associations/{association}/payments/{paymentId}/refunds:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: '#/components/parameters/PaymentId'
+    post:
+      tags: [Paiements]
+      operationId: refundPayment
+      summary: Rembourser un paiement
+      description: Remboursement total via SumUp. Émet `payment.refunded`. Rôle `SERVICE` (rms) ou `STUDRP_ADMIN`.
+      parameters:
+        - $ref: './common/schemas.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string }
+            example: { reason: Vente annulée en caisse }
+      responses:
+        '201':
+          description: Remboursement effectué.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Payment' }
+              example:
+                paymentId: 3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f
+                purpose: SALE
+                method: CARD_TERMINAL
+                status: REFUNDED
+                amountCents: 200
+                split: { commissionRate: 0.045, associationAmountCents: 191, platformAmountCents: 9 }
+                studentId: null
+                reference: { kind: SALE, id: 0b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e }
+                providerTransactionId: TX-SUMUP-9902
+                createdAt: '2026-11-21T21:15:00Z'
+                completedAt: '2026-11-21T21:15:20Z'
+                refundedAt: '2026-11-21T21:20:00Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common/schemas.yaml#/components/responses/Conflict' }
+
+  /v1/providers/sumup/notifications:
+    post:
+      tags: [Fournisseur]
+      operationId: receiveSumupNotification
+      summary: Notification de SumUp
+      description: |
+        URL donnée à SumUp pour être prévenu d'un changement de statut de checkout.
+        Format exact à confirmer dans la documentation SumUp par l'équipe MONEY.
+        **MONEY ne fait jamais confiance au corps reçu** : il relit le statut du checkout
+        dans l'API SumUp avant de publier `payment.succeeded` ou `payment.failed`.
+        Seule route publique de MONEY ; la gateway la laisse passer sans jeton.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Corps défini par SumUp (champs nommés par SumUp, hors conventions STUD'RP).
+              additionalProperties: true
+            example: { id: chk_sumup_def456, event_type: CHECKOUT_STATUS_CHANGED }
+      responses:
+        '200':
+          description: Notification prise en compte.
+          content:
+            application/json:
+              schema: { $ref: './common/schemas.yaml#/components/schemas/WebhookAck' }
+              example: { received: true }
+
+  /v1/webhooks/events:
+    post:
+      tags: [Webhooks]
+      operationId: receiveMoneyEvent
+      summary: Recevoir un événement
+      description: Reçoit `association.*` (taux de commission mis à jour, association suspendue).
+      security: []
+      parameters:
+        - $ref: './common/events.yaml#/components/parameters/EventIdHeader'
+        - $ref: './common/events.yaml#/components/parameters/EventTypeHeader'
+        - $ref: './common/events.yaml#/components/parameters/SignatureHeader'
+      requestBody: { $ref: './common/events.yaml#/components/requestBodies/IncomingEvent' }
+      responses:
+        '200': { $ref: './common/events.yaml#/components/responses/EventAccepted' }
+        '401': { $ref: './common/events.yaml#/components/responses/InvalidSignature' }
+
+components:
+  securitySchemes:
+    bearerAuth: { $ref: './common/schemas.yaml#/components/securitySchemes/bearerAuth' }
+    serviceApiKey: { $ref: './common/schemas.yaml#/components/securitySchemes/serviceApiKey' }
+  parameters:
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+  schemas:
+    PaymentCreate:
+      type: object
+      required: [purpose, method, amountCents, reference]
+      properties:
+        purpose: { $ref: './common/schemas.yaml#/components/schemas/PaymentPurpose' }
+        method:
+          type: string
+          enum: [ONLINE, CARD_TERMINAL]
+        amountCents:
+          type: integer
+          minimum: 1
+        studentId: { type: [string, 'null'], format: uuid }
+        reference: { $ref: './common/events.yaml#/components/schemas/PaymentReference' }
+        description:
+          type: string
+          maxLength: 120
+          description: Libellé affiché sur la page de paiement ou le TPE.
+        returnUrl:
+          type: string
+          format: uri
+          description: Obligatoire pour ONLINE, page où revenir après paiement.
+    Payment:
+      type: object
+      required: [paymentId, purpose, method, status, amountCents, split, reference, createdAt]
+      properties:
+        paymentId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        purpose: { $ref: './common/schemas.yaml#/components/schemas/PaymentPurpose' }
+        method: { $ref: './common/schemas.yaml#/components/schemas/PaymentMethod' }
+        status: { $ref: './common/schemas.yaml#/components/schemas/PaymentStatus' }
+        amountCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        split: { $ref: './common/schemas.yaml#/components/schemas/Split' }
+        studentId: { type: [string, 'null'], format: uuid }
+        reference: { $ref: './common/events.yaml#/components/schemas/PaymentReference' }
+        checkoutUrl: { type: string, format: uri, description: Page de paiement SumUp (ONLINE). }
+        providerTransactionId: { type: string, description: Identifiant de la transaction chez SumUp. }
+        failureReason: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+        completedAt: { type: [string, 'null'], format: date-time }
+        refundedAt: { type: [string, 'null'], format: date-time }
+    PaymentPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/Payment' } }
+        pagination: { $ref: './common/schemas.yaml#/components/schemas/Pagination' }

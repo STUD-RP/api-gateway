@@ -1,0 +1,887 @@
+openapi: 3.1.0
+info:
+  title: STUD — Étudiants et Alumni
+  version: 1.0.0-draft
+  summary: Adhérents, cotisations, comptes étudiants, alumni et RGPD.
+  description: |
+    **Service maître** des étudiants, adhésions, soldes de compte et profils alumni.
+
+    - Consommé par : RMS (recherche, débit du compte), BACK (liste, statistiques alumni), gateway (connexion).
+    - Événements émis : `student.created`, `student.updated`, `student.anonymized`, `membership.paid`.
+    - Événements reçus : `association.*`, `event.*`, `sale.recorded`, `sale.cancelled`, `payment.*`.
+
+    Le solde du compte d'un étudiant doit toujours égaler le solde de son sous-compte 411 dans BACK.
+  contact:
+    name: Équipe 6 — Architecture
+servers:
+  - url: https://api.studrp.example/api/stud
+    description: Via la gateway (seul accès autorisé hors développement)
+  - url: http://localhost:3001
+    description: Développement local
+security:
+  - bearerAuth: []
+tags:
+  - name: Étudiants
+    description: Fiches contact, statut d'adhésion, recherche.
+  - name: Compte
+    description: Solde et historique des transactions de l'étudiant.
+  - name: Adhésions
+    description: Cotisation annuelle (c'est une vente pour la comptabilité).
+  - name: Alumni
+    description: Profils des anciens et statistiques anonymisées.
+  - name: RGPD
+    description: Export et effacement des données personnelles.
+  - name: Interne
+    description: Routes réservées aux services (clé X-Api-Key).
+  - name: Webhooks
+    description: Réception des événements poussés par la gateway.
+  - name: Santé
+paths:
+  /health:
+    get:
+      tags: [Santé]
+      operationId: getStudHealth
+      summary: État du service
+      description: Utilisé par `GET /api/health` de la gateway.
+      security: []
+      responses:
+        '200':
+          description: Service opérationnel.
+          content:
+            application/json:
+              schema: { $ref: './common/schemas.yaml#/components/schemas/Health' }
+              example: { status: UP, service: stud, version: 1.0.0 }
+
+  /v1/associations/{association}/students:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Étudiants]
+      operationId: listStudents
+      summary: Rechercher des étudiants
+      description: |
+        Recherche par nom, prénom, email ou numéro d'adhérent. Utilisé par la caisse (RMS)
+        pour retrouver un acheteur et par BACK pour la liste des adhésions.
+        Rôles : `BUREAU`, `SERVICE`.
+      parameters:
+        - name: search
+          in: query
+          description: Texte libre (nom, prénom, email, numéro d'adhérent).
+          schema: { type: string }
+          example: martin
+        - name: membershipStatus
+          in: query
+          schema: { $ref: './common/schemas.yaml#/components/schemas/MembershipStatus' }
+        - name: memberType
+          in: query
+          schema: { $ref: './common/schemas.yaml#/components/schemas/MemberType' }
+        - $ref: './common/schemas.yaml#/components/parameters/Page'
+        - $ref: './common/schemas.yaml#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page de résultats.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StudentPage' }
+              example:
+                data:
+                  - studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+                    memberNumber: CNAMUS-2027-0042
+                    firstName: Léa
+                    lastName: Martin
+                    email: lea.martin@cnam.example
+                    memberType: STUDENT
+                    membership: { status: UP_TO_DATE, season: 2026-2027, paidAt: '2026-09-15T08:30:00Z' }
+                    balanceCents: 300
+                pagination: { page: 1, pageSize: 20, totalItems: 1, totalPages: 1 }
+        '400': { $ref: './common/schemas.yaml#/components/responses/BadRequest' }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+    post:
+      tags: [Étudiants]
+      operationId: createStudent
+      summary: Créer un contact
+      description: |
+        Crée la fiche d'un contact (étudiant, membre de l'école ou alumni). Il n'est pas
+        encore adhérent. Émet `student.created`. Rôles : `BUREAU`, ou inscription libre via le front STUD.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StudentCreate' }
+            example:
+              firstName: Léa
+              lastName: Martin
+              email: lea.martin@cnam.example
+              phone: '+33612345678'
+              memberType: STUDENT
+              promotion: '2027'
+              password: un-mot-de-passe-solide
+              consents:
+                - purpose: DIRECTORY
+                - purpose: ALUMNI_STATISTICS
+      responses:
+        '201':
+          description: Contact créé.
+          headers:
+            Location: { $ref: './common/schemas.yaml#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Student' }
+              example:
+                studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+                memberNumber: CNAMUS-2027-0042
+                firstName: Léa
+                lastName: Martin
+                email: lea.martin@cnam.example
+                phone: '+33612345678'
+                memberType: STUDENT
+                promotion: '2027'
+                membership: { status: NONE, season: null, paidAt: null }
+                balanceCents: 0
+                consents:
+                  - { purpose: DIRECTORY, givenAt: '2026-11-10T09:00:00Z' }
+                  - { purpose: ALUMNI_STATISTICS, givenAt: '2026-11-10T09:00:00Z' }
+                createdAt: '2026-11-10T09:00:00Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '409': { $ref: './common/schemas.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/students/{studentId}:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: './common/schemas.yaml#/components/parameters/StudentId'
+    get:
+      tags: [Étudiants]
+      operationId: getStudent
+      summary: Lire une fiche étudiant
+      description: 'Rôles : `BUREAU`, `SERVICE`, ou `STUDENT` pour sa propre fiche.'
+      responses:
+        '200':
+          description: La fiche.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Student' }
+              example:
+                studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+                memberNumber: CNAMUS-2027-0042
+                firstName: Léa
+                lastName: Martin
+                email: lea.martin@cnam.example
+                phone: '+33612345678'
+                photoUrl: https://cdn.studrp.example/cnamus/photos/0042.jpg
+                memberType: STUDENT
+                promotion: '2027'
+                membership: { status: UP_TO_DATE, season: 2026-2027, paidAt: '2026-09-15T08:30:00Z' }
+                balanceCents: 300
+                consents:
+                  - { purpose: DIRECTORY, givenAt: '2026-09-15T08:00:00Z' }
+                createdAt: '2026-09-15T08:00:00Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+    patch:
+      tags: [Étudiants]
+      operationId: updateStudent
+      summary: Modifier une fiche étudiant
+      description: Seuls les champs envoyés sont modifiés. Émet `student.updated`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StudentUpdate' }
+            example: { phone: '+33698765432', photoUrl: https://cdn.studrp.example/cnamus/photos/0042-v2.jpg }
+      responses:
+        '200':
+          description: Fiche mise à jour.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Student' }
+              example:
+                studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+                memberNumber: CNAMUS-2027-0042
+                firstName: Léa
+                lastName: Martin
+                email: lea.martin@cnam.example
+                phone: '+33698765432'
+                photoUrl: https://cdn.studrp.example/cnamus/photos/0042-v2.jpg
+                memberType: STUDENT
+                membership: { status: UP_TO_DATE, season: 2026-2027, paidAt: '2026-09-15T08:30:00Z' }
+                balanceCents: 300
+                createdAt: '2026-09-15T08:00:00Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/students/{studentId}/account:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: './common/schemas.yaml#/components/parameters/StudentId'
+    get:
+      tags: [Compte]
+      operationId: getStudentAccount
+      summary: Lire le solde du compte
+      description: Solde créditeur (positif) ou débiteur (négatif) et découvert autorisé.
+      responses:
+        '200':
+          description: Le compte.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+              example:
+                studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+                balanceCents: 300
+                overdraftLimitCents: 0
+                availableCents: 300
+                ledgerAccount: 411-CNAMUS-0042
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+
+  /v1/associations/{association}/students/{studentId}/account/transactions:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: './common/schemas.yaml#/components/parameters/StudentId'
+    get:
+      tags: [Compte]
+      operationId: listAccountTransactions
+      summary: Historique des transactions
+      description: |
+        Tout ce que l'étudiant voit dans son espace : débits et crédits du compte,
+        mais aussi ses achats payés en espèces ou par carte (montant informatif,
+        sans effet sur le solde). Plus récent en premier.
+      parameters:
+        - $ref: './common/schemas.yaml#/components/parameters/From'
+        - $ref: './common/schemas.yaml#/components/parameters/To'
+        - $ref: './common/schemas.yaml#/components/parameters/Page'
+        - $ref: './common/schemas.yaml#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page de transactions.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccountTransactionPage' }
+              example:
+                data:
+                  - transactionId: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                    kind: DEBIT
+                    amountCents: -50
+                    affectsBalance: true
+                    balanceAfterCents: 250
+                    label: Café
+                    saleId: 9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+                    eventName: Pause du mardi
+                    occurredAt: '2026-11-10T10:42:00Z'
+                  - transactionId: 2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e
+                    kind: TOP_UP
+                    amountCents: 500
+                    affectsBalance: true
+                    balanceAfterCents: 300
+                    label: Rechargement en ligne
+                    paymentId: 4d5e6f7a-8b9c-4d0e-8f1a-2b3c4d5e6f7a
+                    occurredAt: '2026-11-03T18:10:00Z'
+                pagination: { page: 1, pageSize: 20, totalItems: 2, totalPages: 1 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+
+  /v1/associations/{association}/students/{studentId}/account/debits:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: './common/schemas.yaml#/components/parameters/StudentId'
+    post:
+      tags: [Compte]
+      operationId: debitStudentAccount
+      summary: Débiter le compte adhérent
+      description: |
+        Appelé par RMS **avant** de valider une vente payée sur le compte.
+        Refusé (`422`, type `insufficient-balance`) si le débit dépasse le découvert autorisé.
+        Rôle : `SERVICE` (rms) uniquement.
+      security:
+        - serviceApiKey: []
+      parameters:
+        - $ref: './common/schemas.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DebitRequest' }
+            example:
+              amountCents: 50
+              label: Café
+              saleId: 9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+              eventId: 6c5d4e3f-2a1b-4c0d-9e8f-7a6b5c4d3e2f
+      responses:
+        '201':
+          description: Compte débité.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccountTransaction' }
+              example:
+                transactionId: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                kind: DEBIT
+                amountCents: -50
+                affectsBalance: true
+                balanceAfterCents: 250
+                label: Café
+                saleId: 9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+                occurredAt: '2026-11-10T10:42:00Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common/schemas.yaml#/components/responses/Conflict' }
+        '422':
+          description: Solde insuffisant.
+          content:
+            application/problem+json:
+              schema: { $ref: './common/schemas.yaml#/components/schemas/Problem' }
+              example:
+                type: https://docs.studrp.example/errors/insufficient-balance
+                title: Solde insuffisant
+                status: 422
+                detail: Le solde disponible est de 0,20 €, la vente coûte 0,50 €.
+                requestId: b2e4c6a8-1f0d-4c55-8a7e-3c9d2e1f0a77
+
+  /v1/associations/{association}/students/{studentId}/account/top-ups:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: './common/schemas.yaml#/components/parameters/StudentId'
+    post:
+      tags: [Compte]
+      operationId: startTopUp
+      summary: Recharger le compte en ligne
+      description: |
+        STUD demande un paiement en ligne à MONEY (`purpose: TOP_UP`) et renvoie l'URL
+        de paiement SumUp. Le compte n'est crédité qu'à réception de `payment.succeeded`.
+      parameters:
+        - $ref: './common/schemas.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amountCents, returnUrl]
+              properties:
+                amountCents:
+                  type: integer
+                  minimum: 100
+                  description: Montant à créditer, en centimes (1 € minimum).
+                returnUrl:
+                  type: string
+                  format: uri
+                  description: Page du front STUD où revenir après le paiement.
+            example: { amountCents: 1000, returnUrl: https://cnamus.studrp.example/compte }
+      responses:
+        '201':
+          description: Paiement créé, rediriger l'étudiant vers checkoutUrl.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckoutStarted' }
+              example:
+                paymentId: 4d5e6f7a-8b9c-4d0e-8f1a-2b3c4d5e6f7a
+                checkoutUrl: https://checkout.sumup.example/pay/abc123
+                status: PENDING
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/students/{studentId}/memberships:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: './common/schemas.yaml#/components/parameters/StudentId'
+    get:
+      tags: [Adhésions]
+      operationId: listMemberships
+      summary: Historique des adhésions
+      description: Une adhésion par saison payée.
+      responses:
+        '200':
+          description: Liste des adhésions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Membership' }
+              example:
+                - membershipId: 5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b
+                  season: 2026-2027
+                  status: PAID
+                  amountCents: 1100
+                  paymentId: 6f7a8b9c-0d1e-4f2a-9b3c-4d5e6f7a8b9c
+                  paidAt: '2026-09-15T08:30:00Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+    post:
+      tags: [Adhésions]
+      operationId: startMembership
+      summary: Payer la cotisation annuelle
+      description: |
+        Crée l'adhésion (statut `PENDING`) et un paiement en ligne MONEY (`purpose: MEMBERSHIP`)
+        du montant fixé par l'association (11 € pour CNAMUS). À réception de `payment.succeeded`,
+        l'adhésion passe à `PAID`, le statut à `UP_TO_DATE`, et STUD émet `membership.paid`.
+      parameters:
+        - $ref: './common/schemas.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [season, returnUrl]
+              properties:
+                season: { type: string, pattern: '^\d{4}-\d{4}$', example: 2026-2027 }
+                returnUrl: { type: string, format: uri }
+            example: { season: 2026-2027, returnUrl: https://cnamus.studrp.example/adhesion }
+      responses:
+        '201':
+          description: Adhésion en attente de paiement.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckoutStarted' }
+              example:
+                paymentId: 6f7a8b9c-0d1e-4f2a-9b3c-4d5e6f7a8b9c
+                membershipId: 5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b
+                checkoutUrl: https://checkout.sumup.example/pay/def456
+                status: PENDING
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '409': { $ref: './common/schemas.yaml#/components/responses/Conflict' }
+
+  /v1/associations/{association}/students/{studentId}/alumni-profile:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: './common/schemas.yaml#/components/parameters/StudentId'
+    get:
+      tags: [Alumni]
+      operationId: getAlumniProfile
+      summary: Lire un profil alumni
+      description: Visible par l'alumni lui-même uniquement. Le bureau ne voit que les statistiques.
+      responses:
+        '200':
+          description: Le profil.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlumniProfile' }
+              example:
+                graduationYear: 2027
+                openToMentoring: true
+                countries: [Allemagne]
+                firstJob:
+                  unemploymentMonths: 2
+                  jobTitle: Développeur back-end
+                  contractType: CDI
+                  companyName: Exemple SAS
+                  industry: Services numériques
+                  annualGrossSalaryCents: 4200000
+                  annualBonusCents: 300000
+                  otherBenefits: Télétravail 2 j/semaine
+                  startedAt: '2027-09-01'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+    put:
+      tags: [Alumni]
+      operationId: putAlumniProfile
+      summary: Renseigner son profil alumni
+      description: Remplace le profil. Nécessite le consentement `ALUMNI_STATISTICS` pour entrer dans les statistiques.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AlumniProfile' }
+            example:
+              graduationYear: 2027
+              openToMentoring: true
+              countries: [Allemagne]
+              firstJob:
+                unemploymentMonths: 2
+                jobTitle: Développeur back-end
+                contractType: CDI
+                companyName: Exemple SAS
+                industry: Services numériques
+                annualGrossSalaryCents: 4200000
+                annualBonusCents: 300000
+                startedAt: '2027-09-01'
+      responses:
+        '200':
+          description: Profil enregistré.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlumniProfile' }
+              example:
+                graduationYear: 2027
+                openToMentoring: true
+                countries: [Allemagne]
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/alumni/statistics:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Alumni]
+      operationId: getAlumniStatistics
+      summary: Statistiques alumni anonymisées
+      description: |
+        Agrégats sur les premières embauches. **Anonymat** : un groupe de moins de
+        5 personnes n'est jamais détaillé (`masked: true`, valeurs nulles).
+        Rôles : `BUREAU`, `SERVICE` (back).
+      parameters:
+        - name: graduationYear
+          in: query
+          schema: { type: integer }
+          example: 2027
+        - name: groupBy
+          in: query
+          schema: { type: string, enum: [contractType, industry, graduationYear], default: contractType }
+      responses:
+        '200':
+          description: Statistiques.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlumniStatistics' }
+              example:
+                minGroupSize: 5
+                respondents: 23
+                groups:
+                  - key: CDI
+                    count: 17
+                    masked: false
+                    medianAnnualGrossSalaryCents: 3900000
+                    averageUnemploymentMonths: 2.4
+                  - key: CDD
+                    count: 3
+                    masked: true
+                    medianAnnualGrossSalaryCents: null
+                    averageUnemploymentMonths: null
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+
+  /v1/associations/{association}/students/{studentId}/gdpr-export:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: './common/schemas.yaml#/components/parameters/StudentId'
+    get:
+      tags: [RGPD]
+      operationId: exportStudentData
+      summary: Exporter ses données (droit d'accès)
+      description: Toutes les données détenues par STUD sur la personne, en JSON.
+      responses:
+        '200':
+          description: Export complet.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  student: { $ref: '#/components/schemas/Student' }
+                  memberships:
+                    type: array
+                    items: { $ref: '#/components/schemas/Membership' }
+                  transactions:
+                    type: array
+                    items: { $ref: '#/components/schemas/AccountTransaction' }
+                  alumniProfile: { $ref: '#/components/schemas/AlumniProfile' }
+                  exportedAt: { type: string, format: date-time }
+              example:
+                student:
+                  studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+                  memberNumber: CNAMUS-2027-0042
+                  firstName: Léa
+                  lastName: Martin
+                  email: lea.martin@cnam.example
+                  memberType: STUDENT
+                  membership: { status: UP_TO_DATE, season: 2026-2027, paidAt: '2026-09-15T08:30:00Z' }
+                  balanceCents: 250
+                  createdAt: '2026-09-15T08:00:00Z'
+                memberships: []
+                transactions: []
+                exportedAt: '2026-11-10T11:00:00Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+
+  /v1/associations/{association}/students/{studentId}/anonymization:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: './common/schemas.yaml#/components/parameters/StudentId'
+    post:
+      tags: [RGPD]
+      operationId: anonymizeStudent
+      summary: Effacer ses données (anonymisation)
+      description: |
+        Remplace nom, email, téléphone et photo par des valeurs anonymes. L'identifiant
+        et les transactions restent (obligation comptable). Émet `student.anonymized`.
+        Refusé si le solde est débiteur.
+      responses:
+        '202':
+          description: Anonymisation effectuée, propagation aux autres services en cours.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  studentId: { type: string, format: uuid }
+                  anonymizedAt: { type: string, format: date-time }
+              example: { studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c, anonymizedAt: '2026-11-10T11:05:00Z' }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/internal/auth/verify:
+    post:
+      tags: [Interne]
+      operationId: verifyStudentCredentials
+      summary: Vérifier un mot de passe étudiant
+      description: |
+        Appelé uniquement par la gateway lors de `POST /api/auth/login` avec `realm=student`.
+        STUD ne délivre aucun jeton : il confirme l'identité, la gateway signe le JWT.
+      security:
+        - serviceApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CredentialsCheck' }
+            example: { association: cnamus, email: lea.martin@cnam.example, password: un-mot-de-passe-solide }
+      responses:
+        '200':
+          description: Identité confirmée.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VerifiedIdentity' }
+              example: { userId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c, role: STUDENT, name: Léa Martin }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+
+  /v1/webhooks/events:
+    post:
+      tags: [Webhooks]
+      operationId: receiveStudEvent
+      summary: Recevoir un événement
+      description: |
+        Reçoit `association.*`, `event.*`, `sale.recorded`, `sale.cancelled`, `payment.*`.
+        - `sale.recorded` : ajoute l'achat à l'historique (le débit ACCOUNT existe déjà, on le relie).
+        - `sale.cancelled` d'une vente ACCOUNT : recrédite le compte.
+        - `payment.succeeded` : crédite un rechargement ou valide une adhésion.
+      security: []
+      parameters:
+        - $ref: './common/events.yaml#/components/parameters/EventIdHeader'
+        - $ref: './common/events.yaml#/components/parameters/EventTypeHeader'
+        - $ref: './common/events.yaml#/components/parameters/SignatureHeader'
+      requestBody: { $ref: './common/events.yaml#/components/requestBodies/IncomingEvent' }
+      responses:
+        '200': { $ref: './common/events.yaml#/components/responses/EventAccepted' }
+        '401': { $ref: './common/events.yaml#/components/responses/InvalidSignature' }
+
+components:
+  securitySchemes:
+    bearerAuth: { $ref: './common/schemas.yaml#/components/securitySchemes/bearerAuth' }
+    serviceApiKey: { $ref: './common/schemas.yaml#/components/securitySchemes/serviceApiKey' }
+  schemas:
+    Consent:
+      type: object
+      required: [purpose]
+      properties:
+        purpose:
+          type: string
+          description: |
+            - `DIRECTORY` : apparaître dans l'annuaire du réseau.
+            - `ALUMNI_STATISTICS` : entrer dans les statistiques anonymisées.
+            - `COMMUNICATIONS` : recevoir les communications de l'association.
+          enum: [DIRECTORY, ALUMNI_STATISTICS, COMMUNICATIONS]
+        givenAt: { type: string, format: date-time, readOnly: true }
+    MembershipSummary:
+      type: object
+      required: [status]
+      properties:
+        status: { $ref: './common/schemas.yaml#/components/schemas/MembershipStatus' }
+        season: { type: [string, 'null'], example: 2026-2027 }
+        paidAt: { type: [string, 'null'], format: date-time }
+    Student:
+      type: object
+      required: [studentId, memberNumber, firstName, lastName, email, memberType, membership, balanceCents]
+      properties:
+        studentId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        memberNumber:
+          type: string
+          description: Identifiant lisible, unique dans l'association.
+          example: CNAMUS-2027-0042
+        firstName: { type: string }
+        lastName: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string, example: '+33612345678' }
+        photoUrl: { type: string, format: uri }
+        memberType: { $ref: './common/schemas.yaml#/components/schemas/MemberType' }
+        promotion: { type: string, example: '2027' }
+        membership: { $ref: '#/components/schemas/MembershipSummary' }
+        balanceCents: { $ref: './common/schemas.yaml#/components/schemas/SignedCents' }
+        consents:
+          type: array
+          items: { $ref: '#/components/schemas/Consent' }
+        createdAt: { type: string, format: date-time }
+    StudentCreate:
+      type: object
+      required: [firstName, lastName, email, memberType]
+      properties:
+        firstName: { type: string, minLength: 1 }
+        lastName: { type: string, minLength: 1 }
+        email: { type: string, format: email }
+        phone: { type: string }
+        photoUrl: { type: string, format: uri }
+        memberType: { $ref: './common/schemas.yaml#/components/schemas/MemberType' }
+        promotion: { type: string }
+        password:
+          type: string
+          minLength: 10
+          writeOnly: true
+          description: Stocké haché par STUD (bcrypt ou argon2), jamais renvoyé.
+        consents:
+          type: array
+          items: { $ref: '#/components/schemas/Consent' }
+    StudentUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        firstName: { type: string }
+        lastName: { type: string }
+        phone: { type: string }
+        photoUrl: { type: string, format: uri }
+        memberType: { $ref: './common/schemas.yaml#/components/schemas/MemberType' }
+        consents:
+          type: array
+          items: { $ref: '#/components/schemas/Consent' }
+    StudentPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Student' }
+        pagination: { $ref: './common/schemas.yaml#/components/schemas/Pagination' }
+    Account:
+      type: object
+      required: [studentId, balanceCents, overdraftLimitCents, availableCents]
+      properties:
+        studentId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        balanceCents: { $ref: './common/schemas.yaml#/components/schemas/SignedCents' }
+        overdraftLimitCents:
+          $ref: './common/schemas.yaml#/components/schemas/Cents'
+        availableCents:
+          description: balanceCents + overdraftLimitCents (ce que l'étudiant peut encore dépenser).
+          type: integer
+        ledgerAccount:
+          type: string
+          description: Sous-compte 411 correspondant dans la comptabilité de BACK.
+          example: 411-CNAMUS-0042
+    AccountTransaction:
+      type: object
+      required: [transactionId, kind, amountCents, affectsBalance, label, occurredAt]
+      properties:
+        transactionId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        kind:
+          type: string
+          description: |
+            - `DEBIT` : achat payé sur le compte.
+            - `CREDIT` : remboursement ou annulation de vente.
+            - `TOP_UP` : rechargement.
+            - `PURCHASE_INFO` : achat payé en espèces ou carte, affiché sans effet sur le solde.
+            - `MEMBERSHIP` : cotisation (affichage).
+          enum: [DEBIT, CREDIT, TOP_UP, PURCHASE_INFO, MEMBERSHIP]
+        amountCents: { $ref: './common/schemas.yaml#/components/schemas/SignedCents' }
+        affectsBalance: { type: boolean }
+        balanceAfterCents: { $ref: './common/schemas.yaml#/components/schemas/SignedCents' }
+        label: { type: string }
+        saleId: { type: [string, 'null'], format: uuid }
+        paymentId: { type: [string, 'null'], format: uuid }
+        eventName: { type: [string, 'null'] }
+        occurredAt: { type: string, format: date-time }
+    AccountTransactionPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/AccountTransaction' }
+        pagination: { $ref: './common/schemas.yaml#/components/schemas/Pagination' }
+    DebitRequest:
+      type: object
+      required: [amountCents, label, saleId]
+      properties:
+        amountCents:
+          type: integer
+          minimum: 1
+          description: Montant à débiter (positif), en centimes.
+        label: { type: string }
+        saleId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        eventId: { type: [string, 'null'], format: uuid }
+    CheckoutStarted:
+      type: object
+      required: [paymentId, checkoutUrl, status]
+      properties:
+        paymentId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        membershipId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        checkoutUrl: { type: string, format: uri }
+        status: { $ref: './common/schemas.yaml#/components/schemas/PaymentStatus' }
+    Membership:
+      type: object
+      required: [membershipId, season, status, amountCents]
+      properties:
+        membershipId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        season: { type: string, example: 2026-2027 }
+        status: { type: string, enum: [PENDING, PAID, CANCELLED] }
+        amountCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        paymentId: { type: [string, 'null'], format: uuid }
+        paidAt: { type: [string, 'null'], format: date-time }
+    AlumniProfile:
+      type: object
+      properties:
+        graduationYear: { type: integer, example: 2027 }
+        openToMentoring:
+          type: boolean
+          description: Accepte d'être contacté pour un stage ou une alternance.
+        countries:
+          type: array
+          description: Pays où l'alumni peut aider (stages à l'étranger).
+          items: { type: string }
+        firstJob:
+          type: object
+          description: Première embauche. Jamais exposée individuellement hors de STUD.
+          properties:
+            unemploymentMonths: { type: integer, minimum: 0, description: 'Temps de chômage avant embauche, en mois.' }
+            jobTitle: { type: string }
+            contractType: { type: string, enum: [CDI, CDD, ALTERNANCE, FREELANCE, STAGE, AUTRE] }
+            companyName: { type: string }
+            industry: { type: string }
+            annualGrossSalaryCents:
+              $ref: './common/schemas.yaml#/components/schemas/Cents'
+              description: Salaire brut annuel hors primes, km, tickets restaurant.
+            annualBonusCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+            otherBenefits: { type: string }
+            startedAt: { type: string, format: date }
+    AlumniStatistics:
+      type: object
+      required: [minGroupSize, respondents, groups]
+      properties:
+        minGroupSize:
+          type: integer
+          description: Taille minimale d'un groupe pour être détaillé (anonymat).
+        respondents: { type: integer }
+        groups:
+          type: array
+          items:
+            type: object
+            required: [key, count, masked]
+            properties:
+              key: { type: string }
+              count: { type: integer }
+              masked: { type: boolean }
+              medianAnnualGrossSalaryCents: { type: [integer, 'null'] }
+              averageUnemploymentMonths: { type: [number, 'null'] }
+    CredentialsCheck:
+      type: object
+      required: [association, email, password]
+      properties:
+        association: { $ref: './common/schemas.yaml#/components/schemas/AssociationSlug' }
+        email: { type: string, format: email }
+        password: { type: string, writeOnly: true }
+    VerifiedIdentity:
+      type: object
+      required: [userId, role, name]
+      properties:
+        userId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        role: { $ref: './common/schemas.yaml#/components/schemas/UserRole' }
+        name: { type: string }

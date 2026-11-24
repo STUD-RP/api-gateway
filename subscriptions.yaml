@@ -1,0 +1,133 @@
+# Source : catalogue d'événements du document de stratégie d'échange (section 7). Maintenu par l'équipe 6.
+version: 1
+description: Abonnements aux événements, lus par la gateway au démarrage. Modifier ce fichier = pull request relue
+  par l'équipe 6.
+services:
+  stud:
+    baseUrlEnv: STUD_URL
+    webhookPath: /v1/webhooks/events
+    webhookSecretEnv: STUD_WEBHOOK_SECRET
+    apiKeyEnv: STUD_API_KEY
+  back:
+    baseUrlEnv: BACK_URL
+    webhookPath: /v1/webhooks/events
+    webhookSecretEnv: BACK_WEBHOOK_SECRET
+    apiKeyEnv: BACK_API_KEY
+  rms:
+    baseUrlEnv: RMS_URL
+    webhookPath: /v1/webhooks/events
+    webhookSecretEnv: RMS_WEBHOOK_SECRET
+    apiKeyEnv: RMS_API_KEY
+  admin:
+    baseUrlEnv: ADMIN_URL
+    webhookPath: /v1/webhooks/events
+    webhookSecretEnv: ADMIN_WEBHOOK_SECRET
+    apiKeyEnv: ADMIN_API_KEY
+  money:
+    baseUrlEnv: MONEY_URL
+    webhookPath: /v1/webhooks/events
+    webhookSecretEnv: MONEY_WEBHOOK_SECRET
+    apiKeyEnv: MONEY_API_KEY
+delivery:
+  timeoutSeconds: 5
+  retryDelays:
+  - 10s
+  - 1m
+  - 5m
+  - 30m
+  - 2h
+  signature: 'HMAC-SHA256 du corps brut, en-tête X-StudRP-Signature: sha256=<hex>'
+events:
+  association.created:
+    publisher: admin
+    subscribers:
+    - stud
+    - back
+    - rms
+    - money
+  association.updated:
+    publisher: admin
+    subscribers:
+    - stud
+    - back
+    - rms
+    - money
+  student.created:
+    publisher: stud
+    subscribers:
+    - back
+  student.updated:
+    publisher: stud
+    subscribers:
+    - back
+  student.anonymized:
+    publisher: stud
+    subscribers:
+    - back
+    - rms
+    - admin
+  membership.paid:
+    publisher: stud
+    subscribers:
+    - back
+  catalog.item.created:
+    publisher: back
+    subscribers:
+    - rms
+  catalog.item.updated:
+    publisher: back
+    subscribers:
+    - rms
+  event.created:
+    publisher: back
+    subscribers:
+    - rms
+    - stud
+  event.updated:
+    publisher: back
+    subscribers:
+    - rms
+    - stud
+  event.closed:
+    publisher: back
+    subscribers:
+    - rms
+    - stud
+  sale.recorded:
+    publisher: rms
+    subscribers:
+    - back
+    - stud
+    - admin
+  sale.cancelled:
+    publisher: rms
+    subscribers:
+    - back
+    - stud
+    - admin
+  payment.succeeded:
+    publisher: money
+    subscribers:
+    - stud
+    - back
+    - rms
+    - admin
+  payment.failed:
+    publisher: money
+    subscribers:
+    - stud
+    - rms
+  payment.refunded:
+    publisher: money
+    subscribers:
+    - stud
+    - back
+    - admin
+  accounting.entry.created:
+    publisher: back
+    subscribers:
+    - admin
+  ticket.updated:
+    publisher: admin
+    subscribers:
+    - back

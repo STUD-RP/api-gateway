@@ -1,0 +1,394 @@
+# =============================================================================
+# STUD'RP — Catalogue des événements (schémas de l'enveloppe et des données)
+# Référencé par gateway.openapi.yaml (section `webhooks`) et par le point de
+# réception `POST /v1/webhooks/events` de chaque service.
+# =============================================================================
+openapi: 3.1.0
+info:
+  title: STUD'RP — Événements
+  version: 1.0.0
+  description: |
+    Un événement = un fait métier publié une seule fois par son service maître,
+    puis poussé par la gateway à chaque abonné (voir `subscriptions.yaml`).
+    Livraison « au moins une fois », ordre non garanti : chaque abonné ignore
+    un `id` déjà traité.
+paths: {}
+components:
+  parameters:
+    EventIdHeader:
+      name: X-StudRP-Event-Id
+      in: header
+      required: true
+      description: Identifiant unique de l'événement (identique à `id` dans le corps).
+      schema:
+        type: string
+        format: uuid
+    EventTypeHeader:
+      name: X-StudRP-Event-Type
+      in: header
+      required: true
+      description: Type de l'événement (identique à `type` dans le corps).
+      schema:
+        $ref: '#/components/schemas/EventType'
+    SignatureHeader:
+      name: X-StudRP-Signature
+      in: header
+      required: true
+      description: |
+        `sha256=` suivi du HMAC-SHA256 (hexadécimal) du corps brut de la requête,
+        calculé avec le secret webhook de l'abonné. À vérifier avant tout traitement.
+      schema:
+        type: string
+        pattern: '^sha256=[0-9a-f]{64}$'
+      example: sha256=5d41402abc4b2a76b9719d911017c5925d41402abc4b2a76b9719d911017c592
+
+  schemas:
+    EventType:
+      type: string
+      enum:
+        - association.created
+        - association.updated
+        - student.created
+        - student.updated
+        - student.anonymized
+        - membership.paid
+        - catalog.item.created
+        - catalog.item.updated
+        - event.created
+        - event.updated
+        - event.closed
+        - sale.recorded
+        - sale.cancelled
+        - payment.succeeded
+        - payment.failed
+        - payment.refunded
+        - accounting.entry.created
+        - ticket.updated
+    ServiceName:
+      type: string
+      description: Service émetteur.
+      enum: [stud, back, rms, admin, money]
+
+    EventEnvelope:
+      type: object
+      description: Enveloppe commune à tous les événements. Seul `data` change selon `type`.
+      required: [id, type, version, source, association, occurredAt, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Identifiant unique, généré par l'émetteur. Sert à ignorer les doublons.
+        type:
+          $ref: '#/components/schemas/EventType'
+        version:
+          type: integer
+          minimum: 1
+          description: Version du schéma de `data`. Augmente en cas de changement incompatible.
+        source:
+          $ref: '#/components/schemas/ServiceName'
+        association:
+          $ref: './schemas.yaml#/components/schemas/AssociationSlug'
+        occurredAt:
+          type: string
+          format: date-time
+          description: Moment du fait métier (pas de la livraison).
+        correlationId:
+          type: string
+          format: uuid
+          description: X-Request-Id de la requête qui a provoqué le fait.
+        data:
+          type: object
+          description: Données propres au type (voir les schémas `*Data`).
+
+    # --- Enveloppes typées (pour la doc et la validation) --------------------
+    AssociationEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { enum: [association.created, association.updated] }
+            source: { const: admin }
+            data: { $ref: '#/components/schemas/AssociationData' }
+    StudentEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { enum: [student.created, student.updated] }
+            source: { const: stud }
+            data: { $ref: '#/components/schemas/StudentData' }
+    StudentAnonymizedEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: student.anonymized }
+            source: { const: stud }
+            data: { $ref: '#/components/schemas/StudentAnonymizedData' }
+    MembershipPaidEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: membership.paid }
+            source: { const: stud }
+            data: { $ref: '#/components/schemas/MembershipPaidData' }
+    CatalogItemEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { enum: [catalog.item.created, catalog.item.updated] }
+            source: { const: back }
+            data: { $ref: '#/components/schemas/CatalogItemData' }
+    AssoEventEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { enum: [event.created, event.updated, event.closed] }
+            source: { const: back }
+            data: { $ref: '#/components/schemas/AssoEventData' }
+    SaleRecordedEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: sale.recorded }
+            source: { const: rms }
+            data: { $ref: '#/components/schemas/SaleData' }
+    SaleCancelledEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: sale.cancelled }
+            source: { const: rms }
+            data: { $ref: '#/components/schemas/SaleCancelledData' }
+    PaymentEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { enum: [payment.succeeded, payment.failed, payment.refunded] }
+            source: { const: money }
+            data: { $ref: '#/components/schemas/PaymentData' }
+    AccountingEntryEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: accounting.entry.created }
+            source: { const: back }
+            data: { $ref: '#/components/schemas/AccountingEntryData' }
+    TicketEvent:
+      allOf:
+        - $ref: '#/components/schemas/EventEnvelope'
+        - type: object
+          properties:
+            type: { const: ticket.updated }
+            source: { const: admin }
+            data: { $ref: '#/components/schemas/TicketData' }
+
+    # --- Données par type ----------------------------------------------------
+    AssociationData:
+      type: object
+      required: [slug, displayName, status]
+      properties:
+        slug: { $ref: './schemas.yaml#/components/schemas/AssociationSlug' }
+        displayName: { type: string, example: CNAMUS }
+        status: { type: string, enum: [ACTIVE, SUSPENDED] }
+        commissionRate: { $ref: './schemas.yaml#/components/schemas/Rate' }
+        defaultVatRate: { $ref: './schemas.yaml#/components/schemas/Rate' }
+        overdraftLimitCents: { $ref: './schemas.yaml#/components/schemas/Cents' }
+        membershipFeeCents: { $ref: './schemas.yaml#/components/schemas/Cents' }
+    StudentData:
+      type: object
+      description: 'Données minimales (pas d''email ni de téléphone : minimisation RGPD).'
+      required: [studentId, memberNumber, memberType, membershipStatus]
+      properties:
+        studentId: { type: string, format: uuid }
+        memberNumber: { type: string, example: CNAMUS-2027-0042 }
+        displayName: { type: string, example: Léa M. }
+        memberType: { $ref: './schemas.yaml#/components/schemas/MemberType' }
+        membershipStatus: { $ref: './schemas.yaml#/components/schemas/MembershipStatus' }
+    StudentAnonymizedData:
+      type: object
+      required: [studentId]
+      properties:
+        studentId: { type: string, format: uuid }
+    MembershipPaidData:
+      type: object
+      required: [membershipId, studentId, season, amountCents, paymentId]
+      properties:
+        membershipId: { type: string, format: uuid }
+        studentId: { type: string, format: uuid }
+        season: { type: string, example: 2026-2027 }
+        amountCents: { $ref: './schemas.yaml#/components/schemas/Cents' }
+        paymentId: { type: string, format: uuid }
+    CatalogItemData:
+      type: object
+      required: [itemId, label, standardPriceCents, memberPriceCents, vatRate, active]
+      properties:
+        itemId: { type: string, format: uuid }
+        label: { type: string, example: Jus d'orange }
+        standardPriceCents: { $ref: './schemas.yaml#/components/schemas/Cents' }
+        memberPriceCents: { $ref: './schemas.yaml#/components/schemas/Cents' }
+        vatRate: { $ref: './schemas.yaml#/components/schemas/Rate' }
+        active: { type: boolean }
+    AssoEventData:
+      type: object
+      required: [eventId, name, startsAt, status]
+      properties:
+        eventId: { type: string, format: uuid }
+        name: { type: string, example: Soirée d'intégration 2026 }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        status: { type: string, enum: [PLANNED, OPEN, CLOSED] }
+    SaleData:
+      type: object
+      required: [saleId, paymentMethod, totalCents, lines, soldAt]
+      properties:
+        saleId: { type: string, format: uuid }
+        eventId:
+          type: [string, 'null']
+          format: uuid
+          description: Événement de rattachement (null = vente hors événement).
+        studentId:
+          type: [string, 'null']
+          format: uuid
+          description: Acheteur identifié (null = vente anonyme).
+        paymentMethod: { $ref: './schemas.yaml#/components/schemas/PaymentMethod' }
+        accountTransactionId:
+          type: [string, 'null']
+          format: uuid
+          description: Débit du compte adhérent dans STUD (si paymentMethod = ACCOUNT).
+        paymentId:
+          type: [string, 'null']
+          format: uuid
+          description: Paiement MONEY (si paymentMethod = CARD_TERMINAL).
+        totalCents: { $ref: './schemas.yaml#/components/schemas/Cents' }
+        lines:
+          type: array
+          minItems: 1
+          items: { $ref: './schemas.yaml#/components/schemas/SaleLine' }
+        soldAt: { type: string, format: date-time }
+    SaleCancelledData:
+      type: object
+      required: [saleId, reason]
+      properties:
+        saleId: { type: string, format: uuid }
+        reason: { type: string, example: Erreur de saisie du caissier }
+    PaymentData:
+      type: object
+      required: [paymentId, purpose, method, status, amountCents, split]
+      properties:
+        paymentId: { type: string, format: uuid }
+        purpose: { $ref: './schemas.yaml#/components/schemas/PaymentPurpose' }
+        method: { $ref: './schemas.yaml#/components/schemas/PaymentMethod' }
+        status: { $ref: './schemas.yaml#/components/schemas/PaymentStatus' }
+        amountCents: { $ref: './schemas.yaml#/components/schemas/Cents' }
+        split: { $ref: './schemas.yaml#/components/schemas/Split' }
+        studentId:
+          type: [string, 'null']
+          format: uuid
+        reference:
+          $ref: '#/components/schemas/PaymentReference'
+        failureReason:
+          type: [string, 'null']
+          example: null
+    PaymentReference:
+      type: object
+      description: Objet métier réglé par le paiement.
+      required: [kind, id]
+      properties:
+        kind: { type: string, enum: [SALE, MEMBERSHIP, TOP_UP] }
+        id: { type: string, format: uuid }
+    AccountingEntryData:
+      type: object
+      required: [entryId, journal, date, lines, sourceEventId]
+      properties:
+        entryId: { type: string, format: uuid }
+        journal: { type: string, enum: [ACHAT, REGLEMENT_FOURNISSEUR, VENTE, ENCAISSEMENT, OD] }
+        date: { type: string, format: date }
+        eventId: { type: [string, 'null'], format: uuid }
+        sourceEventId:
+          type: [string, 'null']
+          format: uuid
+          description: Événement STUD'RP à l'origine de l'écriture (null = saisie manuelle).
+        totalDebitCents: { $ref: './schemas.yaml#/components/schemas/Cents' }
+        lines:
+          type: array
+          items:
+            type: object
+            required: [account, debitCents, creditCents]
+            properties:
+              account: { type: string, example: '706' }
+              debitCents: { $ref: './schemas.yaml#/components/schemas/Cents' }
+              creditCents: { $ref: './schemas.yaml#/components/schemas/Cents' }
+    TicketData:
+      type: object
+      required: [ticketId, status]
+      properties:
+        ticketId: { type: string, format: uuid }
+        status: { type: string, enum: [OPEN, IN_PROGRESS, WAITING_CUSTOMER, RESOLVED] }
+        lastMessagePreview: { type: string, example: 'Correctif déployé, pouvez-vous vérifier ?' }
+
+  # Opération réutilisée par chaque service abonné pour décrire son point de réception.
+  requestBodies:
+    IncomingEvent:
+      required: true
+      description: Un événement poussé par la gateway.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/EventEnvelope'
+          examples:
+            saleRecorded:
+              summary: Un café vendu au RMS, payé sur le compte adhérent
+              value:
+                id: 0b6c2f0e-6a4b-4a43-9d3c-2a6f8f0c1d11
+                type: sale.recorded
+                version: 1
+                source: rms
+                association: cnamus
+                occurredAt: '2026-11-10T10:42:00Z'
+                correlationId: b2e4c6a8-1f0d-4c55-8a7e-3c9d2e1f0a77
+                data:
+                  saleId: 9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+                  eventId: 6c5d4e3f-2a1b-4c0d-9e8f-7a6b5c4d3e2f
+                  studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+                  paymentMethod: ACCOUNT
+                  accountTransactionId: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                  paymentId: null
+                  totalCents: 50
+                  lines:
+                    - itemId: 7e6f5a4b-3c2d-4e1f-8a9b-0c1d2e3f4a5b
+                      label: Café
+                      quantity: 1
+                      unitPriceCents: 50
+                      priceTier: MEMBER
+                      vatRate: 0.2
+                      totalCents: 50
+                  soldAt: '2026-11-10T10:42:00Z'
+  responses:
+    EventAccepted:
+      description: Événement reçu (ou déjà reçu). Répondre en moins de 5 s, traiter ensuite.
+      content:
+        application/json:
+          schema:
+            $ref: './schemas.yaml#/components/schemas/WebhookAck'
+          example:
+            received: true
+            duplicate: false
+    InvalidSignature:
+      description: Signature absente ou invalide. La gateway ne réessaie pas.
+      content:
+        application/problem+json:
+          schema:
+            $ref: './schemas.yaml#/components/schemas/Problem'
+          example:
+            type: https://docs.studrp.example/errors/invalid-signature
+            title: Signature invalide
+            status: 401
+            detail: X-StudRP-Signature ne correspond pas au corps reçu.

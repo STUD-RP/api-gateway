@@ -1,0 +1,334 @@
+openapi: 3.1.0
+info:
+  title: ASSO RMS — Caisse enregistreuse mobile
+  version: 1.0.0-draft
+  summary: Saisie des ventes par référence et par événement.
+  description: |
+    **Service maître** des ventes de caisse. Le back-end RMS orchestre une vente :
+
+    1. il lit les prix dans BACK (`GET /catalog/items`) et le statut de l'acheteur dans STUD ;
+    2. selon le moyen de paiement :
+       - `ACCOUNT` → débit synchrone du compte dans STUD (`POST .../account/debits`), vente `COMPLETED` ;
+       - `CASH` → vente `COMPLETED` immédiatement ;
+       - `CARD_TERMINAL` → paiement MONEY créé, vente `PENDING_PAYMENT` jusqu'au `payment.succeeded` ;
+    3. une fois la vente `COMPLETED`, il publie `sale.recorded`.
+
+    Pas de facturette : l'étudiant voit sa transaction dans STUD.
+
+    - Événements émis : `sale.recorded`, `sale.cancelled`.
+    - Événements reçus : `association.*`, `catalog.item.*`, `event.*`, `student.anonymized`, `payment.succeeded`, `payment.failed`.
+servers:
+  - url: https://api.studrp.example/api/rms
+    description: Via la gateway
+  - url: http://localhost:3003
+    description: Développement local
+security:
+  - bearerAuth: []
+tags:
+  - name: Ventes
+    description: Saisie, suivi et annulation des ventes.
+  - name: Webhooks
+    description: Réception des événements poussés par la gateway.
+  - name: Santé
+paths:
+  /health:
+    get:
+      tags: [Santé]
+      operationId: getRmsHealth
+      summary: État du service
+      description: Utilisé par `GET /api/health` de la gateway.
+      security: []
+      responses:
+        '200':
+          description: Service opérationnel.
+          content:
+            application/json:
+              schema: { $ref: './common/schemas.yaml#/components/schemas/Health' }
+              example: { status: UP, service: rms, version: 1.0.0 }
+
+  /v1/associations/{association}/sales:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Ventes]
+      operationId: listSales
+      summary: Lister les ventes
+      description: Ventes de la caisse, filtrables par événement, acheteur et période. Plus récentes en premier.
+      parameters:
+        - name: eventId
+          in: query
+          schema: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        - name: studentId
+          in: query
+          schema: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/SaleStatus' }
+        - $ref: './common/schemas.yaml#/components/parameters/From'
+        - $ref: './common/schemas.yaml#/components/parameters/To'
+        - $ref: './common/schemas.yaml#/components/parameters/Page'
+        - $ref: './common/schemas.yaml#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page de ventes.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SalePage' }
+              example:
+                data:
+                  - saleId: 9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+                    status: COMPLETED
+                    eventId: 6c5d4e3f-2a1b-4c0d-9e8f-7a6b5c4d3e2f
+                    studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+                    paymentMethod: ACCOUNT
+                    accountTransactionId: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                    paymentId: null
+                    totalCents: 50
+                    lines:
+                      - { itemId: 7e6f5a4b-3c2d-4e1f-8a9b-0c1d2e3f4a5b, label: Café, quantity: 1, unitPriceCents: 50, priceTier: MEMBER, vatRate: 0.2, totalCents: 50 }
+                    cashierId: 2f3e4d5c-6b7a-4891-8a0b-1c2d3e4f5a6b
+                    soldAt: '2026-11-10T10:42:00Z'
+                pagination: { page: 1, pageSize: 20, totalItems: 1, totalPages: 1 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+    post:
+      tags: [Ventes]
+      operationId: createSale
+      summary: Enregistrer une vente
+      description: |
+        Le front envoie les références et quantités ; RMS recalcule les prix depuis BACK
+        (prix adhérent si l'acheteur est `UP_TO_DATE`). Le front n'envoie jamais de prix.
+
+        Réponses selon le moyen de paiement :
+        - `ACCOUNT` ou `CASH` → `201`, vente `COMPLETED`, `sale.recorded` publié ;
+        - `CARD_TERMINAL` → `201`, vente `PENDING_PAYMENT` ; le front interroge
+          `GET /sales/{saleId}` toutes les 2 s (2 min maximum) jusqu'à `COMPLETED` ou `PAYMENT_FAILED`.
+
+        Erreurs métier (`422`) : solde insuffisant (renvoyé par STUD), référence inactive,
+        événement clôturé, `ACCOUNT` sans `studentId`.
+      parameters:
+        - $ref: './common/schemas.yaml#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SaleCreate' }
+            examples:
+              surCompte:
+                summary: Café payé sur le compte adhérent
+                value:
+                  eventId: 6c5d4e3f-2a1b-4c0d-9e8f-7a6b5c4d3e2f
+                  studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+                  paymentMethod: ACCOUNT
+                  lines:
+                    - { itemId: 7e6f5a4b-3c2d-4e1f-8a9b-0c1d2e3f4a5b, quantity: 1 }
+              parCarte:
+                summary: Deux jus d'orange payés par carte, acheteur anonyme
+                value:
+                  eventId: 7d6e5f4a-3b2c-4d1e-8f9a-0b1c2d3e4f5a
+                  studentId: null
+                  paymentMethod: CARD_TERMINAL
+                  lines:
+                    - { itemId: 8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918, quantity: 2 }
+      responses:
+        '201':
+          description: Vente créée.
+          headers:
+            Location: { $ref: './common/schemas.yaml#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Sale' }
+              examples:
+                surCompte:
+                  summary: Vente terminée
+                  value:
+                    saleId: 9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+                    status: COMPLETED
+                    eventId: 6c5d4e3f-2a1b-4c0d-9e8f-7a6b5c4d3e2f
+                    studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+                    paymentMethod: ACCOUNT
+                    accountTransactionId: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                    paymentId: null
+                    totalCents: 50
+                    lines:
+                      - { itemId: 7e6f5a4b-3c2d-4e1f-8a9b-0c1d2e3f4a5b, label: Café, quantity: 1, unitPriceCents: 50, priceTier: MEMBER, vatRate: 0.2, totalCents: 50 }
+                    soldAt: '2026-11-10T10:42:00Z'
+                parCarte:
+                  summary: En attente du TPE
+                  value:
+                    saleId: 0b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e
+                    status: PENDING_PAYMENT
+                    eventId: 7d6e5f4a-3b2c-4d1e-8f9a-0b1c2d3e4f5a
+                    studentId: null
+                    paymentMethod: CARD_TERMINAL
+                    accountTransactionId: null
+                    paymentId: 3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f
+                    totalCents: 200
+                    lines:
+                      - { itemId: 8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918, label: "Jus d'orange", quantity: 2, unitPriceCents: 100, priceTier: STANDARD, vatRate: 0.2, totalCents: 200 }
+                    soldAt: '2026-11-21T21:15:00Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '409': { $ref: './common/schemas.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/sales/{saleId}:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: '#/components/parameters/SaleId'
+    get:
+      tags: [Ventes]
+      operationId: getSale
+      summary: Lire une vente
+      description: Sert aussi à suivre une vente par carte en attente du TPE.
+      responses:
+        '200':
+          description: La vente.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Sale' }
+              example:
+                saleId: 0b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e
+                status: COMPLETED
+                eventId: 7d6e5f4a-3b2c-4d1e-8f9a-0b1c2d3e4f5a
+                studentId: null
+                paymentMethod: CARD_TERMINAL
+                accountTransactionId: null
+                paymentId: 3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f
+                totalCents: 200
+                lines:
+                  - { itemId: 8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918, label: "Jus d'orange", quantity: 2, unitPriceCents: 100, priceTier: STANDARD, vatRate: 0.2, totalCents: 200 }
+                soldAt: '2026-11-21T21:15:00Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+
+  /v1/associations/{association}/sales/{saleId}/cancellation:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: '#/components/parameters/SaleId'
+    post:
+      tags: [Ventes]
+      operationId: cancelSale
+      summary: Annuler une vente
+      description: |
+        La vente passe à `CANCELLED` (elle n'est pas supprimée) et RMS publie `sale.cancelled`.
+        STUD recrédite le compte (ventes `ACCOUNT`), BACK contre-passe les écritures et remet
+        le stock. Pour une vente par carte, RMS demande aussi le remboursement à MONEY.
+        Rôle `BUREAU`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 3 }
+            example: { reason: Erreur de saisie du caissier }
+      responses:
+        '201':
+          description: Vente annulée.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Sale' }
+              example:
+                saleId: 9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+                status: CANCELLED
+                eventId: 6c5d4e3f-2a1b-4c0d-9e8f-7a6b5c4d3e2f
+                studentId: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+                paymentMethod: ACCOUNT
+                accountTransactionId: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                paymentId: null
+                totalCents: 50
+                lines:
+                  - { itemId: 7e6f5a4b-3c2d-4e1f-8a9b-0c1d2e3f4a5b, label: Café, quantity: 1, unitPriceCents: 50, priceTier: MEMBER, vatRate: 0.2, totalCents: 50 }
+                soldAt: '2026-11-10T10:42:00Z'
+                cancelledAt: '2026-11-10T10:45:00Z'
+                cancellationReason: Erreur de saisie du caissier
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common/schemas.yaml#/components/responses/Conflict' }
+
+  /v1/webhooks/events:
+    post:
+      tags: [Webhooks]
+      operationId: receiveRmsEvent
+      summary: Recevoir un événement
+      description: |
+        Reçoit `association.*`, `catalog.item.*`, `event.*`, `student.anonymized`, `payment.succeeded`, `payment.failed`.
+        `payment.succeeded` ou `payment.failed` fait passer une vente `PENDING_PAYMENT`
+        à `COMPLETED` (puis publication de `sale.recorded`) ou à `PAYMENT_FAILED`.
+      security: []
+      parameters:
+        - $ref: './common/events.yaml#/components/parameters/EventIdHeader'
+        - $ref: './common/events.yaml#/components/parameters/EventTypeHeader'
+        - $ref: './common/events.yaml#/components/parameters/SignatureHeader'
+      requestBody: { $ref: './common/events.yaml#/components/requestBodies/IncomingEvent' }
+      responses:
+        '200': { $ref: './common/events.yaml#/components/responses/EventAccepted' }
+        '401': { $ref: './common/events.yaml#/components/responses/InvalidSignature' }
+
+components:
+  securitySchemes:
+    bearerAuth: { $ref: './common/schemas.yaml#/components/securitySchemes/bearerAuth' }
+  parameters:
+    SaleId:
+      name: saleId
+      in: path
+      required: true
+      schema: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+  schemas:
+    SaleStatus:
+      type: string
+      enum: [PENDING_PAYMENT, COMPLETED, PAYMENT_FAILED, CANCELLED]
+    SaleCreate:
+      type: object
+      required: [paymentMethod, lines]
+      properties:
+        eventId:
+          type: [string, 'null']
+          format: uuid
+          description: Événement en cours (OPEN) auquel rattacher la vente.
+        studentId:
+          type: [string, 'null']
+          format: uuid
+          description: Acheteur identifié. Obligatoire pour ACCOUNT et pour le prix adhérent.
+        paymentMethod:
+          type: string
+          enum: [ACCOUNT, CASH, CARD_TERMINAL]
+        lines:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [itemId, quantity]
+            properties:
+              itemId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+              quantity: { type: integer, minimum: 1 }
+    Sale:
+      type: object
+      required: [saleId, status, paymentMethod, totalCents, lines, soldAt]
+      properties:
+        saleId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        status: { $ref: '#/components/schemas/SaleStatus' }
+        eventId: { type: [string, 'null'], format: uuid }
+        studentId: { type: [string, 'null'], format: uuid }
+        paymentMethod: { $ref: './common/schemas.yaml#/components/schemas/PaymentMethod' }
+        accountTransactionId: { type: [string, 'null'], format: uuid }
+        paymentId: { type: [string, 'null'], format: uuid }
+        totalCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        lines:
+          type: array
+          items: { $ref: './common/schemas.yaml#/components/schemas/SaleLine' }
+        cashierId:
+          type: [string, 'null']
+          format: uuid
+          description: Membre du bureau qui tient la caisse (X-User-Id).
+        soldAt: { type: string, format: date-time }
+        cancelledAt: { type: [string, 'null'], format: date-time }
+        cancellationReason: { type: [string, 'null'] }
+    SalePage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/Sale' } }
+        pagination: { $ref: './common/schemas.yaml#/components/schemas/Pagination' }

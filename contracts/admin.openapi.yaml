@@ -1,0 +1,729 @@
+openapi: 3.1.0
+info:
+  title: STUD'RP ADMIN — Administration éditeur
+  version: 1.0.0-draft
+  summary: Associations, comptes administrateurs, paramètres bancaires, commissions, tickets.
+  description: |
+    **Service maître** des associations clientes (marque blanche), de leurs comptes
+    administrateurs, de leurs paramètres bancaires et des tickets de support.
+
+    - Consommé par : tous les services (fiche association), MONEY (paramètres bancaires),
+      BACK (tickets), gateway (connexion du personnel).
+    - Événements émis : `association.created`, `association.updated`, `ticket.updated`.
+    - Événements reçus : `sale.*`, `payment.succeeded`, `payment.refunded`, `accounting.entry.created`, `student.anonymized`.
+
+    Business model : application gratuite, commission sur chaque transaction
+    (`commissionRate`, 4,5 % par défaut, **à confirmer**), hébergement de 100 €/an
+    non facturé si les commissions de l'année dépassent 100 €.
+servers:
+  - url: https://api.studrp.example/api/admin
+    description: Via la gateway
+  - url: http://localhost:3004
+    description: Développement local
+security:
+  - bearerAuth: []
+tags:
+  - name: Associations
+    description: Paramétrage des associations clientes.
+  - name: Comptes
+    description: Comptes administrateurs (bureau) des associations.
+  - name: Banque
+    description: Paramètres bancaires et SumUp (données sensibles).
+  - name: Commissions
+    description: Récapitulatif des écritures et commissions.
+  - name: Tickets
+    description: Support des associations.
+  - name: Interne
+    description: Routes réservées aux services (clé X-Api-Key).
+  - name: Webhooks
+    description: Réception des événements poussés par la gateway.
+  - name: Santé
+paths:
+  /health:
+    get:
+      tags: [Santé]
+      operationId: getAdminHealth
+      summary: État du service
+      description: Utilisé par `GET /api/health` de la gateway.
+      security: []
+      responses:
+        '200':
+          description: Service opérationnel.
+          content:
+            application/json:
+              schema: { $ref: './common/schemas.yaml#/components/schemas/Health' }
+              example: { status: UP, service: admin, version: 1.0.0 }
+
+  /v1/associations:
+    get:
+      tags: [Associations]
+      operationId: listAssociations
+      summary: Lister les associations
+      description: Rôle `STUDRP_ADMIN`.
+      parameters:
+        - $ref: './common/schemas.yaml#/components/parameters/Page'
+        - $ref: './common/schemas.yaml#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page d'associations.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssociationPage' }
+              example:
+                data:
+                  - slug: cnamus
+                    displayName: CNAMUS
+                    status: ACTIVE
+                    branding: { logoUrl: https://cdn.studrp.example/cnamus/logo.png, primaryColor: '#0B5FFF' }
+                    settings: { commissionRate: 0.045, defaultVatRate: 0.2, overdraftLimitCents: 0, membershipFeeCents: 1100, hostingFeeCents: 10000 }
+                    createdAt: '2026-09-01T08:00:00Z'
+                  - slug: adecaweb
+                    displayName: ADECAWEB
+                    status: ACTIVE
+                    branding: { logoUrl: https://cdn.studrp.example/adecaweb/logo.png, primaryColor: '#E4572E' }
+                    settings: { commissionRate: 0.045, defaultVatRate: 0, overdraftLimitCents: 500, membershipFeeCents: 1500, hostingFeeCents: 10000 }
+                    createdAt: '2026-09-01T08:00:00Z'
+                pagination: { page: 1, pageSize: 20, totalItems: 2, totalPages: 1 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+    post:
+      tags: [Associations]
+      operationId: createAssociation
+      summary: Créer une association
+      description: |
+        Le slug devient la clé de l'association dans toutes les URL et tous les événements ;
+        il ne change plus ensuite. Émet `association.created`. Rôle `STUDRP_ADMIN`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssociationCreate' }
+            example:
+              slug: cnamus
+              displayName: CNAMUS
+              branding: { logoUrl: https://cdn.studrp.example/cnamus/logo.png, primaryColor: '#0B5FFF' }
+              settings: { defaultVatRate: 0.2, membershipFeeCents: 1100 }
+      responses:
+        '201':
+          description: Association créée.
+          headers:
+            Location: { $ref: './common/schemas.yaml#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Association' }
+              example:
+                slug: cnamus
+                displayName: CNAMUS
+                status: ACTIVE
+                branding: { logoUrl: https://cdn.studrp.example/cnamus/logo.png, primaryColor: '#0B5FFF' }
+                settings: { commissionRate: 0.045, defaultVatRate: 0.2, overdraftLimitCents: 0, membershipFeeCents: 1100, hostingFeeCents: 10000 }
+                createdAt: '2026-09-01T08:00:00Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '409': { $ref: './common/schemas.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Associations]
+      operationId: getAssociation
+      summary: Lire la fiche d'une association
+      description: |
+        Nom, logo et couleur (marque blanche) et paramètres utilisés par les autres services.
+        Accessible à tout utilisateur de l'association et à tout service.
+      security:
+        - bearerAuth: []
+        - serviceApiKey: []
+      responses:
+        '200':
+          description: L'association.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Association' }
+              example:
+                slug: cnamus
+                displayName: CNAMUS
+                status: ACTIVE
+                branding: { logoUrl: https://cdn.studrp.example/cnamus/logo.png, primaryColor: '#0B5FFF' }
+                settings: { commissionRate: 0.045, defaultVatRate: 0.2, overdraftLimitCents: 0, membershipFeeCents: 1100, hostingFeeCents: 10000 }
+                createdAt: '2026-09-01T08:00:00Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+    patch:
+      tags: [Associations]
+      operationId: updateAssociation
+      summary: Modifier une association
+      description: |
+        Le bureau (`BUREAU`) peut modifier `displayName`, `branding`, `defaultVatRate`,
+        `overdraftLimitCents` et `membershipFeeCents`. Seul `STUDRP_ADMIN` modifie
+        `commissionRate`, `hostingFeeCents` et `status`. Émet `association.updated`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssociationUpdate' }
+            example: { settings: { overdraftLimitCents: 500 } }
+      responses:
+        '200':
+          description: Association modifiée.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Association' }
+              example:
+                slug: cnamus
+                displayName: CNAMUS
+                status: ACTIVE
+                branding: { logoUrl: https://cdn.studrp.example/cnamus/logo.png, primaryColor: '#0B5FFF' }
+                settings: { commissionRate: 0.045, defaultVatRate: 0.2, overdraftLimitCents: 500, membershipFeeCents: 1100, hostingFeeCents: 10000 }
+                createdAt: '2026-09-01T08:00:00Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/admin-accounts:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Comptes]
+      operationId: listAdminAccounts
+      summary: Lister les comptes du bureau
+      description: Rôles `BUREAU`, `STUDRP_ADMIN`.
+      responses:
+        '200':
+          description: Comptes.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AdminAccount' }
+              example:
+                - { accountId: 2f3e4d5c-6b7a-4891-8a0b-1c2d3e4f5a6b, email: tresorier@cnamus.example, name: Hugo Bernard, role: BUREAU, active: true }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+    post:
+      tags: [Comptes]
+      operationId: createAdminAccount
+      summary: Créer un compte du bureau
+      description: Le mot de passe est haché par ADMIN et vérifié lors de la connexion (`realm=staff`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AdminAccountCreate' }
+            example: { email: tresorier@cnamus.example, name: Hugo Bernard, role: BUREAU, password: un-mot-de-passe-solide }
+      responses:
+        '201':
+          description: Compte créé.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminAccount' }
+              example: { accountId: 2f3e4d5c-6b7a-4891-8a0b-1c2d3e4f5a6b, email: tresorier@cnamus.example, name: Hugo Bernard, role: BUREAU, active: true }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '409': { $ref: './common/schemas.yaml#/components/responses/Conflict' }
+
+  /v1/associations/{association}/bank-settings:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Banque]
+      operationId: getBankSettings
+      summary: Lire les paramètres bancaires
+      description: Rôle `STUDRP_ADMIN`. Les secrets ne sont jamais renvoyés en clair (masqués).
+      responses:
+        '200':
+          description: Paramètres (masqués).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BankSettingsMasked' }
+              example: { iban: FR76 **** **** **** **** **** 189, sumupMerchantCode: MC7X****, sumupApiKeySet: true, updatedAt: '2026-09-01T08:00:00Z' }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+    put:
+      tags: [Banque]
+      operationId: putBankSettings
+      summary: Enregistrer les paramètres bancaires
+      description: Rôle `STUDRP_ADMIN`. Stockés chiffrés par ADMIN.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BankSettings' }
+            example: { iban: FR7630006000011234567890189, sumupMerchantCode: MC7XK2PQ, sumupApiKey: sup_sk_exemple_a_remplacer }
+      responses:
+        '200':
+          description: Paramètres enregistrés (masqués).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BankSettingsMasked' }
+              example: { iban: FR76 **** **** **** **** **** 189, sumupMerchantCode: MC7X****, sumupApiKeySet: true, updatedAt: '2026-11-10T09:00:00Z' }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/commissions:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Commissions]
+      operationId: getCommissionSummary
+      summary: Récapitulatif des commissions
+      description: |
+        Calculé à partir des `payment.succeeded` reçus. L'hébergement est dû
+        seulement si les commissions de l'année n'atteignent pas `hostingFeeCents`.
+      parameters:
+        - name: year
+          in: query
+          required: true
+          schema: { type: integer }
+          example: 2026
+      responses:
+        '200':
+          description: Récapitulatif.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommissionSummary' }
+              example:
+                year: 2026
+                transactionsCount: 1284
+                transactionsTotalCents: 412300
+                commissionsCents: 18553
+                hostingFeeCents: 10000
+                hostingFeeDueCents: 0
+                byMonth:
+                  - { month: '2026-09', transactionsTotalCents: 151200, commissionsCents: 6804 }
+                  - { month: '2026-10', transactionsTotalCents: 189600, commissionsCents: 8532 }
+                  - { month: '2026-11', transactionsTotalCents: 71500, commissionsCents: 3217 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+
+  /v1/associations/{association}/accounting-summary:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Commissions]
+      operationId: getAccountingSummary
+      summary: Récapitulatif des écritures
+      description: Totaux par journal, construits à partir des `accounting.entry.created` reçus de BACK.
+      parameters:
+        - $ref: './common/schemas.yaml#/components/parameters/From'
+        - $ref: './common/schemas.yaml#/components/parameters/To'
+      responses:
+        '200':
+          description: Totaux par journal.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entriesCount, byJournal]
+                properties:
+                  entriesCount: { type: integer }
+                  byJournal:
+                    type: array
+                    items:
+                      type: object
+                      required: [journal, entriesCount, totalDebitCents]
+                      properties:
+                        journal: { type: string, enum: [ACHAT, REGLEMENT_FOURNISSEUR, VENTE, ENCAISSEMENT, OD] }
+                        entriesCount: { type: integer }
+                        totalDebitCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+              example:
+                entriesCount: 3
+                byJournal:
+                  - { journal: VENTE, entriesCount: 1, totalDebitCents: 50 }
+                  - { journal: ACHAT, entriesCount: 1, totalDebitCents: 1680 }
+                  - { journal: REGLEMENT_FOURNISSEUR, entriesCount: 1, totalDebitCents: 1680 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+
+  /v1/associations/{association}/tickets:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Tickets]
+      operationId: listTickets
+      summary: Lister les tickets
+      description: Le bureau voit les tickets de son association, STUD'RP voit tout.
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/TicketStatus' }
+        - $ref: './common/schemas.yaml#/components/parameters/Page'
+        - $ref: './common/schemas.yaml#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page de tickets.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TicketPage' }
+              example:
+                data:
+                  - ticketId: 9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b
+                    subject: Le TPE refuse les paiements
+                    category: PAYMENT
+                    priority: HIGH
+                    status: OPEN
+                    createdBy: tresorier@cnamus.example
+                    createdAt: '2026-11-10T09:12:00Z'
+                    messages:
+                      - { author: tresorier@cnamus.example, body: Depuis ce matin le TPE affiche une erreur., sentAt: '2026-11-10T09:12:00Z' }
+                pagination: { page: 1, pageSize: 20, totalItems: 1, totalPages: 1 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+    post:
+      tags: [Tickets]
+      operationId: createTicket
+      summary: Ouvrir un ticket de support
+      description: Ouvert par le bureau depuis BACK. Rôle `BUREAU`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TicketCreate' }
+            example: { subject: Le TPE refuse les paiements, category: PAYMENT, priority: HIGH, message: Depuis ce matin le TPE affiche une erreur. }
+      responses:
+        '201':
+          description: Ticket créé.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+              example:
+                ticketId: 9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b
+                subject: Le TPE refuse les paiements
+                category: PAYMENT
+                priority: HIGH
+                status: OPEN
+                createdBy: tresorier@cnamus.example
+                createdAt: '2026-11-10T09:12:00Z'
+                messages:
+                  - { author: tresorier@cnamus.example, body: Depuis ce matin le TPE affiche une erreur., sentAt: '2026-11-10T09:12:00Z' }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/tickets/{ticketId}:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: '#/components/parameters/TicketId'
+    get:
+      tags: [Tickets]
+      operationId: getTicket
+      summary: Lire un ticket
+      description: Ticket et fil de messages.
+      responses:
+        '200':
+          description: Le ticket.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+              example:
+                ticketId: 9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b
+                subject: Le TPE refuse les paiements
+                category: PAYMENT
+                priority: HIGH
+                status: IN_PROGRESS
+                createdBy: tresorier@cnamus.example
+                createdAt: '2026-11-10T09:12:00Z'
+                messages:
+                  - { author: tresorier@cnamus.example, body: Depuis ce matin le TPE affiche une erreur., sentAt: '2026-11-10T09:12:00Z' }
+                  - { author: support@studrp.example, body: Nous regardons., sentAt: '2026-11-10T09:30:00Z' }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+    patch:
+      tags: [Tickets]
+      operationId: updateTicket
+      summary: Changer le statut d'un ticket
+      description: Émet `ticket.updated`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: '#/components/schemas/TicketStatus' }
+            example: { status: RESOLVED }
+      responses:
+        '200':
+          description: Ticket modifié.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Ticket' }
+              example:
+                ticketId: 9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b
+                subject: Le TPE refuse les paiements
+                category: PAYMENT
+                priority: HIGH
+                status: RESOLVED
+                createdBy: tresorier@cnamus.example
+                createdAt: '2026-11-10T09:12:00Z'
+                messages: []
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+
+  /v1/associations/{association}/tickets/{ticketId}/messages:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: '#/components/parameters/TicketId'
+    post:
+      tags: [Tickets]
+      operationId: addTicketMessage
+      summary: Répondre à un ticket
+      description: Ajoute un message au fil. Émet `ticket.updated`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, minLength: 1 }
+            example: { body: 'Correctif déployé, pouvez-vous vérifier ?' }
+      responses:
+        '201':
+          description: Message ajouté.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TicketMessage' }
+              example: { author: support@studrp.example, body: 'Correctif déployé, pouvez-vous vérifier ?', sentAt: '2026-11-10T10:05:00Z' }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+
+  /v1/internal/associations/{association}/bank-settings:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Interne]
+      operationId: getBankSettingsForMoney
+      summary: Paramètres bancaires pour MONEY
+      description: |
+        Seule route qui renvoie les secrets SumUp en clair, et seulement à la clé de service
+        de MONEY. Jamais exposée aux navigateurs, jamais dans un événement.
+      security:
+        - serviceApiKey: []
+      responses:
+        '200':
+          description: Paramètres complets et taux de commission.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/BankSettings'
+                  - type: object
+                    required: [commissionRate]
+                    properties:
+                      commissionRate: { $ref: './common/schemas.yaml#/components/schemas/Rate' }
+              example: { iban: FR7630006000011234567890189, sumupMerchantCode: MC7XK2PQ, sumupApiKey: sup_sk_exemple_a_remplacer, commissionRate: 0.045 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+
+  /v1/internal/auth/verify:
+    post:
+      tags: [Interne]
+      operationId: verifyStaffCredentials
+      summary: Vérifier un mot de passe du personnel
+      description: |
+        Appelé uniquement par la gateway lors de `POST /api/auth/login` avec `realm=staff`
+        (bureau d'une association ou équipe STUD'RP).
+      security:
+        - serviceApiKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [association, email, password]
+              properties:
+                association: { $ref: './common/schemas.yaml#/components/schemas/AssociationSlug' }
+                email: { type: string, format: email }
+                password: { type: string, writeOnly: true }
+            example: { association: cnamus, email: tresorier@cnamus.example, password: un-mot-de-passe-solide }
+      responses:
+        '200':
+          description: Identité confirmée.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [userId, role, name]
+                properties:
+                  userId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+                  role: { $ref: './common/schemas.yaml#/components/schemas/UserRole' }
+                  name: { type: string }
+              example: { userId: 2f3e4d5c-6b7a-4891-8a0b-1c2d3e4f5a6b, role: BUREAU, name: Hugo Bernard }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+
+  /v1/webhooks/events:
+    post:
+      tags: [Webhooks]
+      operationId: receiveAdminEvent
+      summary: Recevoir un événement
+      description: Reçoit `sale.*`, `payment.succeeded`, `payment.refunded`, `accounting.entry.created`, `student.anonymized` pour les récapitulatifs.
+      security: []
+      parameters:
+        - $ref: './common/events.yaml#/components/parameters/EventIdHeader'
+        - $ref: './common/events.yaml#/components/parameters/EventTypeHeader'
+        - $ref: './common/events.yaml#/components/parameters/SignatureHeader'
+      requestBody: { $ref: './common/events.yaml#/components/requestBodies/IncomingEvent' }
+      responses:
+        '200': { $ref: './common/events.yaml#/components/responses/EventAccepted' }
+        '401': { $ref: './common/events.yaml#/components/responses/InvalidSignature' }
+
+components:
+  securitySchemes:
+    bearerAuth: { $ref: './common/schemas.yaml#/components/securitySchemes/bearerAuth' }
+    serviceApiKey: { $ref: './common/schemas.yaml#/components/securitySchemes/serviceApiKey' }
+  parameters:
+    TicketId:
+      name: ticketId
+      in: path
+      required: true
+      schema: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+  schemas:
+    AssociationSettings:
+      type: object
+      properties:
+        commissionRate:
+          $ref: './common/schemas.yaml#/components/schemas/Rate'
+          description: Commission STUD'RP sur chaque transaction (4,5 % par défaut, à confirmer).
+        defaultVatRate:
+          $ref: './common/schemas.yaml#/components/schemas/Rate'
+          description: Taux de TVA appliqué par défaut aux nouvelles références (0 si non assujettie).
+        overdraftLimitCents:
+          $ref: './common/schemas.yaml#/components/schemas/Cents'
+          description: Découvert autorisé sur un compte adhérent.
+        membershipFeeCents:
+          $ref: './common/schemas.yaml#/components/schemas/Cents'
+          description: Cotisation annuelle (1100 = 11 € pour CNAMUS).
+        hostingFeeCents:
+          $ref: './common/schemas.yaml#/components/schemas/Cents'
+          description: Hébergement annuel, offert si les commissions le dépassent.
+    Branding:
+      type: object
+      description: Marque blanche (l'ERP porte le nom et les couleurs de l'association).
+      properties:
+        logoUrl: { type: string, format: uri }
+        primaryColor: { type: string, pattern: '^#[0-9A-Fa-f]{6}$' }
+    Association:
+      type: object
+      required: [slug, displayName, status, settings]
+      properties:
+        slug: { $ref: './common/schemas.yaml#/components/schemas/AssociationSlug' }
+        displayName: { type: string }
+        status: { type: string, enum: [ACTIVE, SUSPENDED] }
+        branding: { $ref: '#/components/schemas/Branding' }
+        settings: { $ref: '#/components/schemas/AssociationSettings' }
+        createdAt: { type: string, format: date-time }
+    AssociationCreate:
+      type: object
+      required: [slug, displayName]
+      properties:
+        slug: { $ref: './common/schemas.yaml#/components/schemas/AssociationSlug' }
+        displayName: { type: string }
+        branding: { $ref: '#/components/schemas/Branding' }
+        settings: { $ref: '#/components/schemas/AssociationSettings' }
+    AssociationUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        displayName: { type: string }
+        status: { type: string, enum: [ACTIVE, SUSPENDED] }
+        branding: { $ref: '#/components/schemas/Branding' }
+        settings: { $ref: '#/components/schemas/AssociationSettings' }
+    AssociationPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/Association' } }
+        pagination: { $ref: './common/schemas.yaml#/components/schemas/Pagination' }
+    AdminAccount:
+      type: object
+      required: [accountId, email, name, role, active]
+      properties:
+        accountId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        email: { type: string, format: email }
+        name: { type: string }
+        role: { type: string, enum: [BUREAU, STUDRP_ADMIN] }
+        active: { type: boolean }
+    AdminAccountCreate:
+      type: object
+      required: [email, name, role, password]
+      properties:
+        email: { type: string, format: email }
+        name: { type: string }
+        role: { type: string, enum: [BUREAU, STUDRP_ADMIN] }
+        password: { type: string, minLength: 10, writeOnly: true }
+    BankSettings:
+      type: object
+      required: [iban, sumupMerchantCode, sumupApiKey]
+      properties:
+        iban: { type: string }
+        sumupMerchantCode: { type: string }
+        sumupApiKey: { type: string, writeOnly: true }
+    BankSettingsMasked:
+      type: object
+      required: [iban, sumupMerchantCode, sumupApiKeySet]
+      properties:
+        iban: { type: string, description: IBAN masqué. }
+        sumupMerchantCode: { type: string }
+        sumupApiKeySet: { type: boolean }
+        updatedAt: { type: string, format: date-time }
+    CommissionSummary:
+      type: object
+      required: [year, transactionsCount, transactionsTotalCents, commissionsCents, hostingFeeCents, hostingFeeDueCents]
+      properties:
+        year: { type: integer }
+        transactionsCount: { type: integer }
+        transactionsTotalCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        commissionsCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        hostingFeeCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        hostingFeeDueCents:
+          $ref: './common/schemas.yaml#/components/schemas/Cents'
+          description: 0 si commissionsCents ≥ hostingFeeCents, sinon hostingFeeCents.
+        byMonth:
+          type: array
+          items:
+            type: object
+            required: [month, transactionsTotalCents, commissionsCents]
+            properties:
+              month: { type: string, pattern: '^\d{4}-\d{2}$' }
+              transactionsTotalCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+              commissionsCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+    TicketStatus:
+      type: string
+      enum: [OPEN, IN_PROGRESS, WAITING_CUSTOMER, RESOLVED]
+    TicketMessage:
+      type: object
+      required: [author, body, sentAt]
+      properties:
+        author: { type: string }
+        body: { type: string }
+        sentAt: { type: string, format: date-time }
+    Ticket:
+      type: object
+      required: [ticketId, subject, category, status, createdAt, messages]
+      properties:
+        ticketId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        subject: { type: string }
+        category: { type: string, enum: [PAYMENT, ACCOUNTING, ACCESS, BUG, OTHER] }
+        priority: { type: string, enum: [LOW, NORMAL, HIGH] }
+        status: { $ref: '#/components/schemas/TicketStatus' }
+        createdBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        messages: { type: array, items: { $ref: '#/components/schemas/TicketMessage' } }
+    TicketCreate:
+      type: object
+      required: [subject, category, message]
+      properties:
+        subject: { type: string, minLength: 3 }
+        category: { type: string, enum: [PAYMENT, ACCOUNTING, ACCESS, BUG, OTHER] }
+        priority: { type: string, enum: [LOW, NORMAL, HIGH], default: NORMAL }
+        message: { type: string, minLength: 1 }
+    TicketPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/Ticket' } }
+        pagination: { $ref: './common/schemas.yaml#/components/schemas/Pagination' }

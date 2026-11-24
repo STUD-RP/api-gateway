@@ -1,0 +1,950 @@
+openapi: 3.1.0
+info:
+  title: ASSO BACK — Stock, comptabilité et statistiques
+  version: 1.0.0-draft
+  summary: Catalogue, événements, stock, achats, écritures comptables, rentabilité.
+  description: |
+    **Service maître** du catalogue (références et prix), des événements (soirées, pauses),
+    du stock, des achats fournisseurs et de la comptabilité.
+
+    - Consommé par : RMS (catalogue, événements), ADMIN (récapitulatif des écritures).
+    - Événements émis : `catalog.item.*`, `event.*`, `accounting.entry.created`.
+    - Événements reçus : `association.*`, `student.*`, `membership.paid`, `sale.*`, `payment.succeeded`, `payment.refunded`, `ticket.updated`.
+
+    **Règle d'or** : on ne supprime jamais une écriture ni un mouvement de stock.
+    Une erreur se corrige par une écriture inverse (contre-passation) ou un ajustement.
+
+    Correspondance fait reçu → écritures (comptes de l'annexe du sujet) :
+
+    | Fait | Journal | Débit | Crédit |
+    |---|---|---|---|
+    | `sale.recorded` | VENTE | 411 (TTC) | 706 (HT) + 4457 (TVA) |
+    | `sale.recorded` en espèces | ENCAISSEMENT | 530 | 411 |
+    | `membership.paid` | VENTE | 411 | 706 |
+    | `payment.succeeded` | ENCAISSEMENT | 512 (part asso) + 627 (commission) | 411 |
+    | Achat saisi | ACHAT | 601 | 401 |
+    | Règlement saisi | REGLEMENT_FOURNISSEUR | 401 | 512 |
+servers:
+  - url: https://api.studrp.example/api/back
+    description: Via la gateway
+  - url: http://localhost:3002
+    description: Développement local
+security:
+  - bearerAuth: []
+tags:
+  - name: Catalogue
+    description: Bibliothèque de références et prix de vente.
+  - name: Événements
+    description: Soirées et pauses, élément structurant pour la rentabilité.
+  - name: Stock
+    description: Niveaux, mouvements et ajustements (jamais de suppression).
+  - name: Achats
+    description: Achats fournisseurs (entrée en stock) et règlements.
+  - name: Comptabilité
+    description: Écritures générées ou saisies, contre-passation.
+  - name: Webhooks
+    description: Réception des événements poussés par la gateway.
+  - name: Santé
+paths:
+  /health:
+    get:
+      tags: [Santé]
+      operationId: getBackHealth
+      summary: État du service
+      description: Utilisé par `GET /api/health` de la gateway.
+      security: []
+      responses:
+        '200':
+          description: Service opérationnel.
+          content:
+            application/json:
+              schema: { $ref: './common/schemas.yaml#/components/schemas/Health' }
+              example: { status: UP, service: back, version: 1.0.0 }
+
+  /v1/associations/{association}/catalog/items:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Catalogue]
+      operationId: listCatalogItems
+      summary: Rechercher dans le catalogue
+      description: |
+        Utilisé par la caisse pour trouver une référence et ses deux prix (standard et adhérent).
+        Rôles `BUREAU`, `SERVICE`.
+      parameters:
+        - name: search
+          in: query
+          schema: { type: string }
+          example: jus
+        - name: active
+          in: query
+          schema: { type: boolean, default: true }
+        - $ref: './common/schemas.yaml#/components/parameters/Page'
+        - $ref: './common/schemas.yaml#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page de références.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CatalogItemPage' }
+              example:
+                data:
+                  - itemId: 8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918
+                    reference: JUS-ORANGE-25CL
+                    label: Jus d'orange
+                    category: Boissons
+                    standardPriceCents: 100
+                    memberPriceCents: 50
+                    vatRate: 0.2
+                    stockQuantity: 48
+                    active: true
+                pagination: { page: 1, pageSize: 20, totalItems: 1, totalPages: 1 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+    post:
+      tags: [Catalogue]
+      operationId: createCatalogItem
+      summary: Créer une référence
+      description: Émet `catalog.item.created`. Rôle `BUREAU`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CatalogItemCreate' }
+            example:
+              reference: JUS-ORANGE-25CL
+              label: Jus d'orange
+              category: Boissons
+              standardPriceCents: 100
+              memberPriceCents: 50
+              vatRate: 0.2
+      responses:
+        '201':
+          description: Référence créée.
+          headers:
+            Location: { $ref: './common/schemas.yaml#/components/headers/Location' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CatalogItem' }
+              example:
+                itemId: 8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918
+                reference: JUS-ORANGE-25CL
+                label: Jus d'orange
+                category: Boissons
+                standardPriceCents: 100
+                memberPriceCents: 50
+                vatRate: 0.2
+                stockQuantity: 0
+                active: true
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '409': { $ref: './common/schemas.yaml#/components/responses/Conflict' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/catalog/items/{itemId}:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: '#/components/parameters/ItemId'
+    get:
+      tags: [Catalogue]
+      operationId: getCatalogItem
+      summary: Lire une référence
+      description: Prix, TVA et quantité en stock.
+      responses:
+        '200':
+          description: La référence.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CatalogItem' }
+              example:
+                itemId: 8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918
+                reference: JUS-ORANGE-25CL
+                label: Jus d'orange
+                category: Boissons
+                standardPriceCents: 100
+                memberPriceCents: 50
+                vatRate: 0.2
+                stockQuantity: 48
+                active: true
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+    patch:
+      tags: [Catalogue]
+      operationId: updateCatalogItem
+      summary: Modifier une référence ou ses prix
+      description: |
+        Pour retirer une référence de la vente, passer `active` à false (pas de suppression).
+        Émet `catalog.item.updated`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CatalogItemUpdate' }
+            example: { standardPriceCents: 120, memberPriceCents: 60 }
+      responses:
+        '200':
+          description: Référence modifiée.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CatalogItem' }
+              example:
+                itemId: 8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918
+                reference: JUS-ORANGE-25CL
+                label: Jus d'orange
+                category: Boissons
+                standardPriceCents: 120
+                memberPriceCents: 60
+                vatRate: 0.2
+                stockQuantity: 48
+                active: true
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/events:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Événements]
+      operationId: listAssoEvents
+      summary: Lister les événements
+      description: La caisse demande `status=OPEN` pour rattacher ses ventes à l'événement en cours.
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/AssoEventStatus' }
+          example: OPEN
+        - $ref: './common/schemas.yaml#/components/parameters/From'
+        - $ref: './common/schemas.yaml#/components/parameters/To'
+        - $ref: './common/schemas.yaml#/components/parameters/Page'
+        - $ref: './common/schemas.yaml#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page d'événements.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssoEventPage' }
+              example:
+                data:
+                  - eventId: 6c5d4e3f-2a1b-4c0d-9e8f-7a6b5c4d3e2f
+                    name: Pause du mardi
+                    kind: BREAK
+                    startsAt: '2026-11-10T10:30:00Z'
+                    endsAt: '2026-11-10T11:00:00Z'
+                    status: OPEN
+                pagination: { page: 1, pageSize: 20, totalItems: 1, totalPages: 1 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+    post:
+      tags: [Événements]
+      operationId: createAssoEvent
+      summary: Créer un événement
+      description: Émet `event.created`. Rôle `BUREAU`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssoEventCreate' }
+            example:
+              name: Soirée d'intégration 2026
+              kind: PARTY
+              startsAt: '2026-11-21T19:00:00Z'
+              endsAt: '2026-11-22T01:00:00Z'
+              location: Cafétéria du CNAM
+      responses:
+        '201':
+          description: Événement créé.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssoEvent' }
+              example:
+                eventId: 7d6e5f4a-3b2c-4d1e-8f9a-0b1c2d3e4f5a
+                name: Soirée d'intégration 2026
+                kind: PARTY
+                startsAt: '2026-11-21T19:00:00Z'
+                endsAt: '2026-11-22T01:00:00Z'
+                location: Cafétéria du CNAM
+                status: PLANNED
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/events/{eventId}:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: './common/schemas.yaml#/components/parameters/EventId'
+    get:
+      tags: [Événements]
+      operationId: getAssoEvent
+      summary: Lire un événement
+      description: Détail d'un événement.
+      responses:
+        '200':
+          description: L'événement.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssoEvent' }
+              example:
+                eventId: 7d6e5f4a-3b2c-4d1e-8f9a-0b1c2d3e4f5a
+                name: Soirée d'intégration 2026
+                kind: PARTY
+                startsAt: '2026-11-21T19:00:00Z'
+                endsAt: '2026-11-22T01:00:00Z'
+                location: Cafétéria du CNAM
+                status: PLANNED
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+    patch:
+      tags: [Événements]
+      operationId: updateAssoEvent
+      summary: Modifier, ouvrir ou clôturer un événement
+      description: |
+        Passer `status` à `OPEN` rend l'événement sélectionnable en caisse ;
+        à `CLOSED`, il ne reçoit plus de ventes. Émet `event.updated` ou `event.closed`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssoEventUpdate' }
+            example: { status: OPEN }
+      responses:
+        '200':
+          description: Événement modifié.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AssoEvent' }
+              example:
+                eventId: 7d6e5f4a-3b2c-4d1e-8f9a-0b1c2d3e4f5a
+                name: Soirée d'intégration 2026
+                kind: PARTY
+                startsAt: '2026-11-21T19:00:00Z'
+                endsAt: '2026-11-22T01:00:00Z'
+                status: OPEN
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/events/{eventId}/profitability:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: './common/schemas.yaml#/components/parameters/EventId'
+    get:
+      tags: [Événements]
+      operationId: getAssoEventProfitability
+      summary: Rentabilité d'un événement
+      description: |
+        Calculée à partir des écritures portant cet `eventId`.
+        Résultat = ventes HT (706) − achats (601) − commissions STUD'RP (627).
+      responses:
+        '200':
+          description: Rentabilité.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Profitability' }
+              example:
+                eventId: 7d6e5f4a-3b2c-4d1e-8f9a-0b1c2d3e4f5a
+                salesExclVatCents: 84000
+                purchasesCents: 52000
+                commissionsCents: 4536
+                resultCents: 27464
+                salesCount: 312
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+
+  /v1/associations/{association}/stock:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Stock]
+      operationId: listStockLevels
+      summary: Niveaux de stock
+      description: Quantité disponible par référence, calculée à partir des mouvements.
+      parameters:
+        - name: belowThreshold
+          in: query
+          description: Seulement les références sous leur seuil d'alerte.
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: Niveaux de stock.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/StockLevel' }
+              example:
+                - { itemId: 8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918, label: "Jus d'orange", quantity: 48, alertThreshold: 12 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+
+  /v1/associations/{association}/stock/movements:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Stock]
+      operationId: listStockMovements
+      summary: Historique des mouvements de stock
+      description: Entrées (achats), sorties (ventes), annulations et ajustements. Jamais supprimés.
+      parameters:
+        - name: itemId
+          in: query
+          schema: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        - $ref: './common/schemas.yaml#/components/parameters/From'
+        - $ref: './common/schemas.yaml#/components/parameters/To'
+        - $ref: './common/schemas.yaml#/components/parameters/Page'
+        - $ref: './common/schemas.yaml#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page de mouvements.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StockMovementPage' }
+              example:
+                data:
+                  - movementId: 0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d
+                    itemId: 8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918
+                    kind: SALE
+                    quantity: -1
+                    saleId: 9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
+                    occurredAt: '2026-11-10T10:42:00Z'
+                pagination: { page: 1, pageSize: 20, totalItems: 1, totalPages: 1 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+
+  /v1/associations/{association}/stock/adjustments:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    post:
+      tags: [Stock]
+      operationId: createStockAdjustment
+      summary: Ajuster le stock
+      description: Inventaire, casse ou perte. Crée un mouvement `ADJUSTMENT`, rien n'est supprimé.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StockAdjustment' }
+            example:
+              itemId: 8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918
+              quantity: -2
+              reason: Bouteilles cassées
+      responses:
+        '201':
+          description: Mouvement créé.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StockMovement' }
+              example:
+                movementId: 1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e
+                itemId: 8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918
+                kind: ADJUSTMENT
+                quantity: -2
+                reason: Bouteilles cassées
+                occurredAt: '2026-11-10T12:00:00Z'
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/purchases:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Achats]
+      operationId: listPurchases
+      summary: Lister les achats fournisseurs
+      description: Filtrable par événement pour le calcul de rentabilité.
+      parameters:
+        - name: eventId
+          in: query
+          schema: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        - $ref: './common/schemas.yaml#/components/parameters/Page'
+        - $ref: './common/schemas.yaml#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page d'achats.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PurchasePage' }
+              example:
+                data:
+                  - purchaseId: 2c3d4e5f-6a7b-4c8d-9e0f-1a2b3c4d5e6f
+                    supplier: Metro Paris
+                    invoiceNumber: F-2026-1187
+                    purchasedAt: '2026-11-05'
+                    eventId: 7d6e5f4a-3b2c-4d1e-8f9a-0b1c2d3e4f5a
+                    totalCents: 1680
+                    settled: false
+                    lines:
+                      - { itemId: 8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918, quantity: 48, unitCostCents: 35, totalCents: 1680 }
+                pagination: { page: 1, pageSize: 20, totalItems: 1, totalPages: 1 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+    post:
+      tags: [Achats]
+      operationId: createPurchase
+      summary: Saisir un achat (entrée en stock)
+      description: |
+        Crée les mouvements d'entrée en stock et l'écriture ACHAT (601 au débit, 401 au crédit).
+        Émet `accounting.entry.created`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PurchaseCreate' }
+            example:
+              supplier: Metro Paris
+              invoiceNumber: F-2026-1187
+              purchasedAt: '2026-11-05'
+              eventId: 7d6e5f4a-3b2c-4d1e-8f9a-0b1c2d3e4f5a
+              lines:
+                - { itemId: 8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918, quantity: 48, unitCostCents: 35 }
+      responses:
+        '201':
+          description: Achat enregistré.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Purchase' }
+              example:
+                purchaseId: 2c3d4e5f-6a7b-4c8d-9e0f-1a2b3c4d5e6f
+                supplier: Metro Paris
+                invoiceNumber: F-2026-1187
+                purchasedAt: '2026-11-05'
+                eventId: 7d6e5f4a-3b2c-4d1e-8f9a-0b1c2d3e4f5a
+                totalCents: 1680
+                settled: false
+                lines:
+                  - { itemId: 8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918, quantity: 48, unitCostCents: 35, totalCents: 1680 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/purchases/{purchaseId}/settlements:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: '#/components/parameters/PurchaseId'
+    post:
+      tags: [Achats]
+      operationId: settlePurchase
+      summary: Enregistrer le règlement fournisseur
+      description: Crée l'écriture REGLEMENT_FOURNISSEUR (401 au débit, 512 au crédit).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [paidAt, amountCents]
+              properties:
+                paidAt: { type: string, format: date }
+                amountCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+                means: { type: string, enum: [TRANSFER, CARD, CHEQUE, CASH] }
+            example: { paidAt: '2026-11-05', amountCents: 1680, means: CARD }
+      responses:
+        '201':
+          description: Règlement et écriture créés.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccountingEntry' }
+              example:
+                entryId: 3d4e5f6a-7b8c-4d9e-8f0a-1b2c3d4e5f6a
+                journal: REGLEMENT_FOURNISSEUR
+                date: '2026-11-05'
+                label: Règlement facture F-2026-1187 Metro Paris
+                eventId: 7d6e5f4a-3b2c-4d1e-8f9a-0b1c2d3e4f5a
+                sourceEventId: null
+                lines:
+                  - { account: '401', debitCents: 1680, creditCents: 0 }
+                  - { account: '512', debitCents: 0, creditCents: 1680 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/accounting/entries:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+    get:
+      tags: [Comptabilité]
+      operationId: listAccountingEntries
+      summary: Lister les écritures
+      description: Journal comptable filtrable par journal, compte, événement et période.
+      parameters:
+        - name: journal
+          in: query
+          schema: { $ref: '#/components/schemas/Journal' }
+        - name: account
+          in: query
+          description: Numéro de compte ou préfixe (411 renvoie aussi les sous-comptes 411-CNAMUS-xxxx).
+          schema: { type: string }
+          example: '706'
+        - name: eventId
+          in: query
+          schema: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        - $ref: './common/schemas.yaml#/components/parameters/From'
+        - $ref: './common/schemas.yaml#/components/parameters/To'
+        - $ref: './common/schemas.yaml#/components/parameters/Page'
+        - $ref: './common/schemas.yaml#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Page d'écritures.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccountingEntryPage' }
+              example:
+                data:
+                  - entryId: 4e5f6a7b-8c9d-4e0f-9a1b-2c3d4e5f6a7b
+                    journal: VENTE
+                    date: '2026-11-10'
+                    label: Vente RMS Café
+                    eventId: 6c5d4e3f-2a1b-4c0d-9e8f-7a6b5c4d3e2f
+                    sourceEventId: 0b6c2f0e-6a4b-4a43-9d3c-2a6f8f0c1d11
+                    lines:
+                      - { account: 411-CNAMUS-0042, debitCents: 50, creditCents: 0 }
+                      - { account: '706', debitCents: 0, creditCents: 42 }
+                      - { account: '4457', debitCents: 0, creditCents: 8 }
+                pagination: { page: 1, pageSize: 20, totalItems: 1, totalPages: 1 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '403': { $ref: './common/schemas.yaml#/components/responses/Forbidden' }
+    post:
+      tags: [Comptabilité]
+      operationId: createAccountingEntry
+      summary: Saisir une écriture manuelle
+      description: |
+        Écriture d'opération diverse (journal OD), par exemple le capital initial (101/512).
+        Refusée (`422`) si total débit ≠ total crédit. Émet `accounting.entry.created`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AccountingEntryCreate' }
+            example:
+              journal: OD
+              date: '2026-01-01'
+              label: Apport initial
+              lines:
+                - { account: '512', debitCents: 50000, creditCents: 0 }
+                - { account: '101', debitCents: 0, creditCents: 50000 }
+      responses:
+        '201':
+          description: Écriture créée.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccountingEntry' }
+              example:
+                entryId: 5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c
+                journal: OD
+                date: '2026-01-01'
+                label: Apport initial
+                eventId: null
+                sourceEventId: null
+                lines:
+                  - { account: '512', debitCents: 50000, creditCents: 0 }
+                  - { account: '101', debitCents: 0, creditCents: 50000 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '422': { $ref: './common/schemas.yaml#/components/responses/Unprocessable' }
+
+  /v1/associations/{association}/accounting/entries/{entryId}:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: '#/components/parameters/EntryId'
+    get:
+      tags: [Comptabilité]
+      operationId: getAccountingEntry
+      summary: Lire une écriture
+      description: Détail d'une écriture et de ses lignes.
+      responses:
+        '200':
+          description: L'écriture.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccountingEntry' }
+              example:
+                entryId: 4e5f6a7b-8c9d-4e0f-9a1b-2c3d4e5f6a7b
+                journal: VENTE
+                date: '2026-11-10'
+                label: Vente RMS Café
+                eventId: 6c5d4e3f-2a1b-4c0d-9e8f-7a6b5c4d3e2f
+                sourceEventId: 0b6c2f0e-6a4b-4a43-9d3c-2a6f8f0c1d11
+                lines:
+                  - { account: 411-CNAMUS-0042, debitCents: 50, creditCents: 0 }
+                  - { account: '706', debitCents: 0, creditCents: 42 }
+                  - { account: '4457', debitCents: 0, creditCents: 8 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+
+  /v1/associations/{association}/accounting/entries/{entryId}/reversal:
+    parameters:
+      - $ref: './common/schemas.yaml#/components/parameters/Association'
+      - $ref: '#/components/parameters/EntryId'
+    post:
+      tags: [Comptabilité]
+      operationId: reverseAccountingEntry
+      summary: Contre-passer une écriture
+      description: Crée l'écriture inverse (débits et crédits échangés). L'écriture d'origine reste.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string }
+            example: { reason: Erreur de compte }
+      responses:
+        '201':
+          description: Écriture inverse créée.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccountingEntry' }
+              example:
+                entryId: 6a7b8c9d-0e1f-4a2b-9c3d-4e5f6a7b8c9d
+                journal: OD
+                date: '2026-11-10'
+                label: Contre-passation de 5f6a7b8c (Erreur de compte)
+                reversalOf: 5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c
+                eventId: null
+                sourceEventId: null
+                lines:
+                  - { account: '512', debitCents: 0, creditCents: 50000 }
+                  - { account: '101', debitCents: 50000, creditCents: 0 }
+        '401': { $ref: './common/schemas.yaml#/components/responses/Unauthorized' }
+        '404': { $ref: './common/schemas.yaml#/components/responses/NotFound' }
+        '409': { $ref: './common/schemas.yaml#/components/responses/Conflict' }
+
+  /v1/webhooks/events:
+    post:
+      tags: [Webhooks]
+      operationId: receiveBackEvent
+      summary: Recevoir un événement
+      description: |
+        Reçoit `association.*`, `student.*`, `membership.paid`, `sale.*`, `payment.succeeded`, `payment.refunded`, `ticket.updated`.
+        Génère les écritures selon le tableau de l'introduction. Une écriture par `sourceEventId`
+        au plus, même si l'événement est livré deux fois.
+      security: []
+      parameters:
+        - $ref: './common/events.yaml#/components/parameters/EventIdHeader'
+        - $ref: './common/events.yaml#/components/parameters/EventTypeHeader'
+        - $ref: './common/events.yaml#/components/parameters/SignatureHeader'
+      requestBody: { $ref: './common/events.yaml#/components/requestBodies/IncomingEvent' }
+      responses:
+        '200': { $ref: './common/events.yaml#/components/responses/EventAccepted' }
+        '401': { $ref: './common/events.yaml#/components/responses/InvalidSignature' }
+
+components:
+  securitySchemes:
+    bearerAuth: { $ref: './common/schemas.yaml#/components/securitySchemes/bearerAuth' }
+  parameters:
+    ItemId:
+      name: itemId
+      in: path
+      required: true
+      schema: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+    PurchaseId:
+      name: purchaseId
+      in: path
+      required: true
+      schema: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+    EntryId:
+      name: entryId
+      in: path
+      required: true
+      schema: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+  schemas:
+    CatalogItem:
+      type: object
+      required: [itemId, reference, label, standardPriceCents, memberPriceCents, vatRate, active]
+      properties:
+        itemId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        reference: { type: string, description: Code interne unique dans l'association. }
+        label: { type: string }
+        category: { type: string }
+        standardPriceCents:
+          $ref: './common/schemas.yaml#/components/schemas/Cents'
+          description: Prix TTC pour un non-adhérent.
+        memberPriceCents:
+          $ref: './common/schemas.yaml#/components/schemas/Cents'
+          description: Prix TTC pour un adhérent à jour de cotisation.
+        vatRate: { $ref: './common/schemas.yaml#/components/schemas/Rate' }
+        stockQuantity: { type: integer, readOnly: true }
+        active: { type: boolean }
+    CatalogItemCreate:
+      type: object
+      required: [reference, label, standardPriceCents, memberPriceCents]
+      properties:
+        reference: { type: string }
+        label: { type: string }
+        category: { type: string }
+        standardPriceCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        memberPriceCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        vatRate:
+          $ref: './common/schemas.yaml#/components/schemas/Rate'
+          description: Par défaut, le taux de l'association.
+        alertThreshold: { type: integer, minimum: 0 }
+    CatalogItemUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        label: { type: string }
+        category: { type: string }
+        standardPriceCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        memberPriceCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        vatRate: { $ref: './common/schemas.yaml#/components/schemas/Rate' }
+        alertThreshold: { type: integer, minimum: 0 }
+        active: { type: boolean }
+    CatalogItemPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/CatalogItem' } }
+        pagination: { $ref: './common/schemas.yaml#/components/schemas/Pagination' }
+    AssoEventStatus:
+      type: string
+      enum: [PLANNED, OPEN, CLOSED]
+    AssoEvent:
+      type: object
+      required: [eventId, name, kind, startsAt, status]
+      properties:
+        eventId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        name: { type: string }
+        kind: { type: string, enum: [PARTY, BREAK, SALE_DAY, OTHER] }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        location: { type: string }
+        status: { $ref: '#/components/schemas/AssoEventStatus' }
+    AssoEventCreate:
+      type: object
+      required: [name, kind, startsAt]
+      properties:
+        name: { type: string }
+        kind: { type: string, enum: [PARTY, BREAK, SALE_DAY, OTHER] }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        location: { type: string }
+    AssoEventUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        location: { type: string }
+        status: { $ref: '#/components/schemas/AssoEventStatus' }
+    AssoEventPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/AssoEvent' } }
+        pagination: { $ref: './common/schemas.yaml#/components/schemas/Pagination' }
+    Profitability:
+      type: object
+      required: [eventId, salesExclVatCents, purchasesCents, commissionsCents, resultCents]
+      properties:
+        eventId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        salesExclVatCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        purchasesCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        commissionsCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        resultCents: { $ref: './common/schemas.yaml#/components/schemas/SignedCents' }
+        salesCount: { type: integer }
+    StockLevel:
+      type: object
+      required: [itemId, label, quantity]
+      properties:
+        itemId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        label: { type: string }
+        quantity: { type: integer }
+        alertThreshold: { type: integer }
+    StockMovement:
+      type: object
+      required: [movementId, itemId, kind, quantity, occurredAt]
+      properties:
+        movementId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        itemId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        kind: { type: string, enum: [PURCHASE, SALE, SALE_CANCELLATION, ADJUSTMENT] }
+        quantity: { type: integer, description: 'Positif = entrée, négatif = sortie.' }
+        saleId: { type: [string, 'null'], format: uuid }
+        purchaseId: { type: [string, 'null'], format: uuid }
+        reason: { type: string }
+        occurredAt: { type: string, format: date-time }
+    StockMovementPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/StockMovement' } }
+        pagination: { $ref: './common/schemas.yaml#/components/schemas/Pagination' }
+    StockAdjustment:
+      type: object
+      required: [itemId, quantity, reason]
+      properties:
+        itemId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        quantity: { type: integer, not: { const: 0 } }
+        reason: { type: string, minLength: 3 }
+    PurchaseLine:
+      type: object
+      required: [itemId, quantity, unitCostCents]
+      properties:
+        itemId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        quantity: { type: integer, minimum: 1 }
+        unitCostCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        totalCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+    Purchase:
+      type: object
+      required: [purchaseId, supplier, purchasedAt, totalCents, settled, lines]
+      properties:
+        purchaseId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        supplier: { type: string }
+        invoiceNumber: { type: string }
+        purchasedAt: { type: string, format: date }
+        eventId: { type: [string, 'null'], format: uuid }
+        totalCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        settled: { type: boolean }
+        lines: { type: array, items: { $ref: '#/components/schemas/PurchaseLine' } }
+    PurchaseCreate:
+      type: object
+      required: [supplier, purchasedAt, lines]
+      properties:
+        supplier: { type: string }
+        invoiceNumber: { type: string }
+        purchasedAt: { type: string, format: date }
+        eventId: { type: [string, 'null'], format: uuid }
+        lines: { type: array, minItems: 1, items: { $ref: '#/components/schemas/PurchaseLine' } }
+    PurchasePage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/Purchase' } }
+        pagination: { $ref: './common/schemas.yaml#/components/schemas/Pagination' }
+    Journal:
+      type: string
+      enum: [ACHAT, REGLEMENT_FOURNISSEUR, VENTE, ENCAISSEMENT, OD]
+    EntryLine:
+      type: object
+      required: [account, debitCents, creditCents]
+      properties:
+        account:
+          type: string
+          description: Numéro de compte du plan comptable, ou sous-compte 411 d'un étudiant.
+          example: '706'
+        debitCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+        creditCents: { $ref: './common/schemas.yaml#/components/schemas/Cents' }
+    AccountingEntry:
+      type: object
+      required: [entryId, journal, date, label, lines]
+      properties:
+        entryId: { $ref: './common/schemas.yaml#/components/schemas/Uuid' }
+        journal: { $ref: '#/components/schemas/Journal' }
+        date: { type: string, format: date }
+        label: { type: string }
+        eventId: { type: [string, 'null'], format: uuid }
+        sourceEventId:
+          type: [string, 'null']
+          format: uuid
+          description: Événement STUD'RP à l'origine de l'écriture (null = saisie manuelle).
+        reversalOf: { type: [string, 'null'], format: uuid }
+        lines: { type: array, minItems: 2, items: { $ref: '#/components/schemas/EntryLine' } }
+    AccountingEntryCreate:
+      type: object
+      required: [journal, date, label, lines]
+      properties:
+        journal: { $ref: '#/components/schemas/Journal' }
+        date: { type: string, format: date }
+        label: { type: string }
+        eventId: { type: [string, 'null'], format: uuid }
+        lines: { type: array, minItems: 2, items: { $ref: '#/components/schemas/EntryLine' } }
+    AccountingEntryPage:
+      type: object
+      required: [data, pagination]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/AccountingEntry' } }
+        pagination: { $ref: './common/schemas.yaml#/components/schemas/Pagination' }

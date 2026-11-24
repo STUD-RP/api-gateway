@@ -1,0 +1,16 @@
+{
+  "name": "studrp-contracts",
+  "private": true,
+  "description": "Contrats OpenAPI 3.1 des services STUD'RP (équipe 6 Architecture)",
+  "scripts": {
+    "check": "python3 -I tools/check_contracts.py contracts",
+    "lint": "npx -y @stoplight/spectral-cli lint \"contracts/*.openapi.yaml\"",
+    "bundle": "for s in gateway stud back rms admin money; do npx -y @redocly/cli bundle contracts/$s.openapi.yaml -o dist/$s.yaml || exit 1; done",
+    "mock:stud": "npx -y @stoplight/prism-cli mock contracts/stud.openapi.yaml -p 4011",
+    "mock:back": "npx -y @stoplight/prism-cli mock contracts/back.openapi.yaml -p 4012",
+    "mock:rms": "npx -y @stoplight/prism-cli mock contracts/rms.openapi.yaml -p 4013",
+    "mock:admin": "npx -y @stoplight/prism-cli mock contracts/admin.openapi.yaml -p 4014",
+    "mock:money": "npx -y @stoplight/prism-cli mock contracts/money.openapi.yaml -p 4015",
+    "proxy:back": "npx -y @stoplight/prism-cli proxy contracts/back.openapi.yaml http://localhost:3002 -p 4022 --errors"
+  }
+}

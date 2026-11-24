@@ -1,0 +1,384 @@
+# =============================================================================
+# STUD'RP — Composants communs à tous les contrats
+# Maintenu par l'équipe 6 (Architecture). Référencé par chaque contrat via $ref :
+#   $ref: './common/schemas.yaml#/components/schemas/Problem'
+# Ne pas dupliquer ces définitions dans les contrats des services.
+# =============================================================================
+openapi: 3.1.0
+info:
+  title: STUD'RP — Composants communs
+  version: 1.0.0
+  description: |
+    Schémas, paramètres, en-têtes et réponses partagés par tous les services STUD'RP.
+
+    Conventions (voir le document de stratégie d'échange, section 5) :
+    - montants en **centimes d'euro** (entiers), champs suffixés `Cents` ; devise implicite EUR ;
+    - dates ISO 8601 en UTC ;
+    - identifiants UUID v4 générés par le service maître ;
+    - champs JSON en camelCase ;
+    - erreurs au format RFC 9457 (`application/problem+json`).
+paths: {}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Jeton utilisateur émis par la gateway (`POST /api/auth/login`), valable 1 h.
+        Les services ne vérifient pas ce jeton : la gateway le fait et transmet
+        l'identité dans les en-têtes `X-User-Id`, `X-User-Role` et `X-Association`.
+    serviceApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: |
+        Clé d'un service appelant (RMS, STUD…), délivrée par l'équipe 6.
+        Obligatoire pour les routes `/v1/internal/*` et pour publier un événement.
+
+  parameters:
+    Association:
+      name: association
+      in: path
+      required: true
+      description: Slug de l'association, clé structurante de toutes les données.
+      schema:
+        $ref: '#/components/schemas/AssociationSlug'
+      example: cnamus
+    StudentId:
+      name: studentId
+      in: path
+      required: true
+      description: Identifiant de l'étudiant, attribué par STUD.
+      schema:
+        $ref: '#/components/schemas/Uuid'
+    EventId:
+      name: eventId
+      in: path
+      required: true
+      description: Identifiant de l'événement (soirée, pause), attribué par BACK.
+      schema:
+        $ref: '#/components/schemas/Uuid'
+    Page:
+      name: page
+      in: query
+      required: false
+      description: Numéro de page, à partir de 1.
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: pageSize
+      in: query
+      required: false
+      description: Nombre d'éléments par page (100 maximum).
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    From:
+      name: from
+      in: query
+      required: false
+      description: Début de période (inclus), ISO 8601.
+      schema:
+        type: string
+        format: date-time
+    To:
+      name: to
+      in: query
+      required: false
+      description: Fin de période (exclue), ISO 8601.
+      schema:
+        type: string
+        format: date-time
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        UUID choisi par l'appelant. Un même appel rejoué avec la même clé renvoie
+        la même réponse et ne crée rien de plus. Obligatoire sur les ventes et paiements.
+      schema:
+        $ref: '#/components/schemas/Uuid'
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: Identifiant de corrélation. Créé par la gateway s'il manque, propagé partout.
+      schema:
+        $ref: '#/components/schemas/Uuid'
+
+  headers:
+    RequestId:
+      description: Identifiant de corrélation de la requête (à citer en cas de bug).
+      schema:
+        $ref: '#/components/schemas/Uuid'
+    Location:
+      description: URL de la ressource créée.
+      schema:
+        type: string
+
+  responses:
+    BadRequest:
+      description: Requête mal formée (JSON invalide, paramètre de type incorrect).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://docs.studrp.example/errors/bad-request
+            title: Requête invalide
+            status: 400
+            detail: Le paramètre pageSize doit être un entier entre 1 et 100.
+            requestId: b2e4c6a8-1f0d-4c55-8a7e-3c9d2e1f0a77
+    Unauthorized:
+      description: Jeton ou clé de service absent, invalide ou expiré.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://docs.studrp.example/errors/unauthorized
+            title: Authentification requise
+            status: 401
+            detail: Le jeton a expiré, reconnectez-vous.
+            requestId: b2e4c6a8-1f0d-4c55-8a7e-3c9d2e1f0a77
+    Forbidden:
+      description: Authentifié, mais sans le droit d'accéder à cette ressource (autre association, rôle insuffisant).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://docs.studrp.example/errors/forbidden
+            title: Accès refusé
+            status: 403
+            detail: Ce jeton CNAMUS ne donne pas accès aux données de l'association adecaweb.
+            requestId: b2e4c6a8-1f0d-4c55-8a7e-3c9d2e1f0a77
+    NotFound:
+      description: Ressource introuvable dans cette association.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://docs.studrp.example/errors/not-found
+            title: Ressource introuvable
+            status: 404
+            detail: Aucun étudiant 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c dans l'association cnamus.
+            requestId: b2e4c6a8-1f0d-4c55-8a7e-3c9d2e1f0a77
+    Conflict:
+      description: Conflit avec l'état actuel (doublon, clé d'idempotence réutilisée avec un autre corps).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://docs.studrp.example/errors/conflict
+            title: Conflit
+            status: 409
+            detail: Un étudiant avec l'email lea.martin@cnam.example existe déjà.
+            requestId: b2e4c6a8-1f0d-4c55-8a7e-3c9d2e1f0a77
+    Unprocessable:
+      description: Requête bien formée mais refusée par une règle métier.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://docs.studrp.example/errors/validation
+            title: Données invalides
+            status: 422
+            detail: Un ou plusieurs champs sont invalides.
+            requestId: b2e4c6a8-1f0d-4c55-8a7e-3c9d2e1f0a77
+            errors:
+              - field: lines[0].quantity
+                message: doit être supérieur ou égal à 1
+
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+      example: 3f1c2a8e-7b6d-4e15-9c4a-1d2e3f4a5b6c
+    AssociationSlug:
+      type: string
+      description: Slug de l'association (minuscules, chiffres, tirets), fixé par STUD'RP ADMIN.
+      pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+      maxLength: 40
+      examples: [cnamus, adecaweb]
+    Cents:
+      type: integer
+      description: Montant en centimes d'euro. 150 = 1,50 €.
+      example: 150
+    SignedCents:
+      type: integer
+      description: Montant signé en centimes d'euro (négatif = débiteur).
+      example: -230
+    Rate:
+      type: number
+      description: Taux entre 0 et 1. 0.045 = 4,5 %.
+      minimum: 0
+      maximum: 1
+      example: 0.045
+    Timestamp:
+      type: string
+      format: date-time
+      description: Date et heure ISO 8601 en UTC.
+      example: '2026-11-10T10:42:00Z'
+    Problem:
+      type: object
+      description: Erreur au format RFC 9457 (Problem Details), identique pour tous les services.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          description: URL identifiant le type d'erreur (page de doc).
+        title:
+          type: string
+          description: Résumé lisible, stable pour un même type.
+        status:
+          type: integer
+          description: Code HTTP.
+        detail:
+          type: string
+          description: Explication propre à cette occurrence.
+        instance:
+          type: string
+          description: Chemin de la requête en erreur.
+        requestId:
+          $ref: '#/components/schemas/Uuid'
+        errors:
+          type: array
+          description: Détail champ par champ (erreurs de validation).
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+    Pagination:
+      type: object
+      required: [page, pageSize, totalItems, totalPages]
+      properties:
+        page:
+          type: integer
+          example: 1
+        pageSize:
+          type: integer
+          example: 20
+        totalItems:
+          type: integer
+          example: 42
+        totalPages:
+          type: integer
+          example: 3
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [UP, DOWN]
+        service:
+          type: string
+          example: back
+        version:
+          type: string
+          example: 1.0.0
+    UserRole:
+      type: string
+      description: |
+        Rôle porté par le JWT et transmis par la gateway dans `X-User-Role`.
+        - `STUDENT` : étudiant, alumni ou membre de l'école ; ne voit que ses propres données.
+        - `BUREAU` : membre du bureau de l'association ; gère son association.
+        - `STUDRP_ADMIN` : équipe STUD'RP ; toutes les associations.
+        - `SERVICE` : appel d'un service avec sa clé `X-Api-Key`.
+      enum: [STUDENT, BUREAU, STUDRP_ADMIN, SERVICE]
+    MemberType:
+      type: string
+      description: Type d'adhérent (les profs et membres de l'école peuvent adhérer).
+      enum: [STUDENT, STAFF, ALUMNI]
+    MembershipStatus:
+      type: string
+      description: |
+        - `NONE` : contact connu, jamais adhérent.
+        - `PENDING` : paiement de cotisation en cours.
+        - `UP_TO_DATE` : cotisation de la saison en cours payée (donne droit au prix adhérent).
+        - `EXPIRED` : a été adhérent, cotisation de la saison en cours non payée.
+      enum: [NONE, PENDING, UP_TO_DATE, EXPIRED]
+    PaymentMethod:
+      type: string
+      description: |
+        - `ACCOUNT` : débit du compte adhérent (STUD).
+        - `CASH` : espèces encaissées par le caissier.
+        - `CARD_TERMINAL` : carte bancaire sur le TPE SumUp (via MONEY).
+        - `ONLINE` : paiement en ligne SumUp (via MONEY).
+      enum: [ACCOUNT, CASH, CARD_TERMINAL, ONLINE]
+    PaymentPurpose:
+      type: string
+      description: |
+        - `SALE` : vente en caisse.
+        - `MEMBERSHIP` : cotisation annuelle.
+        - `TOP_UP` : rechargement du compte adhérent.
+      enum: [SALE, MEMBERSHIP, TOP_UP]
+    PaymentStatus:
+      type: string
+      enum: [PENDING, SUCCEEDED, FAILED, REFUNDED]
+    Split:
+      type: object
+      description: |
+        Partage d'une transaction : la part de l'association et la commission STUD'RP.
+        `associationAmountCents + platformAmountCents = amountCents` (arrondi au profit de l'association).
+      required: [commissionRate, associationAmountCents, platformAmountCents]
+      properties:
+        commissionRate:
+          $ref: '#/components/schemas/Rate'
+        associationAmountCents:
+          $ref: '#/components/schemas/Cents'
+        platformAmountCents:
+          $ref: '#/components/schemas/Cents'
+      example:
+        commissionRate: 0.045
+        associationAmountCents: 1051
+        platformAmountCents: 49
+    SaleLine:
+      type: object
+      description: Ligne de vente. Le libellé et le prix sont copiés au moment de la vente (historique figé).
+      required: [itemId, label, quantity, unitPriceCents, vatRate, totalCents]
+      properties:
+        itemId:
+          $ref: '#/components/schemas/Uuid'
+        label:
+          type: string
+          example: Café
+        quantity:
+          type: integer
+          minimum: 1
+          example: 1
+        unitPriceCents:
+          $ref: '#/components/schemas/Cents'
+        priceTier:
+          type: string
+          description: Prix appliqué (adhérent ou standard).
+          enum: [MEMBER, STANDARD]
+        vatRate:
+          $ref: '#/components/schemas/Rate'
+        totalCents:
+          $ref: '#/components/schemas/Cents'
+    WebhookAck:
+      type: object
+      description: Accusé de réception d'un événement par un service abonné.
+      required: [received]
+      properties:
+        received:
+          type: boolean
+          example: true
+        duplicate:
+          type: boolean
+          description: Vrai si cet `id` d'événement avait déjà été traité (rien n'est refait).
+          example: false
