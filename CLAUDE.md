@@ -1,4 +1,4 @@
-# AGENTS.md — STUD'RP : contrats d'API + API Gateway (équipe 6)
+# CLAUDE.md — STUD'RP : contrats d'API + API Gateway (équipe 6)
 
 Consignes pour les agents de code (Claude Code, Codex, Cursor…) et pour les humains de
 l'équipe. Elles valent pour toutes les tâches. Les consignes propres à une tâche sont
@@ -57,7 +57,7 @@ circulent uniquement par l'API et par les événements.
 
 ```
 .
-├── AGENTS.md                 ← ce fichier
+├── CLAUDE.md                 ← ce fichier
 ├── README.md                 ← conventions des contrats (à lire)
 ├── package.json              ← scripts check / lint / bundle / mock
 ├── subscriptions.yaml        ← qui émet / qui reçoit chaque événement (lu par la gateway)
