@@ -1,0 +1,93 @@
+# Règles de lint des contrats STUD'RP (équipe 6).
+# Lancer : npm run lint   (ou npx @stoplight/spectral-cli lint contracts/*.openapi.yaml)
+extends: ["spectral:oas"]
+
+rules:
+  # --- Lisibilité de la doc -------------------------------------------------
+  operation-operationId: error
+  operation-description: error
+  operation-tags: error
+  operation-summary:
+    description: Chaque opération a un résumé court (affiché dans la navigation Scalar).
+    severity: error
+    given: "$.paths[*][get,post,put,patch,delete]"
+    then:
+      field: summary
+      function: truthy
+
+  studrp-success-example:
+    description: Chaque réponse 2xx donne au moins un exemple réaliste.
+    severity: error
+    given: "$.paths[*][*].responses[?(@property.match(/^2/))].content[*]"
+    then:
+      function: schema
+      functionOptions:
+        schema:
+          anyOf:
+            - required: [example]
+            - required: [examples]
+
+  studrp-request-example:
+    description: Chaque corps de requête donne au moins un exemple.
+    severity: error
+    given: "$.paths[*][*].requestBody.content[*]"
+    then:
+      function: schema
+      functionOptions:
+        schema:
+          anyOf:
+            - required: [example]
+            - required: [examples]
+
+  # --- Conventions d'URL ----------------------------------------------------
+  studrp-path-prefix:
+    description: >-
+      Routes métier sous /v1/associations/{association} ; seules exceptions
+      /health, /v1/associations (liste), /v1/internal/*, /v1/webhooks/*, /v1/providers/*.
+    severity: error
+    given: "$.paths"
+    then:
+      field: "@key"
+      function: pattern
+      functionOptions:
+        match: "^/(health$|v1/(associations($|/\\{association\\})|internal/|webhooks/|providers/))"
+
+  studrp-no-delete-ledger:
+    description: On ne supprime jamais une écriture, un mouvement de stock, une vente ou un paiement.
+    message: "DELETE interdit sur {{property}} : corriger par une écriture inverse."
+    severity: error
+    given: "$.paths[?(@property.match(/(accounting|stock|sales|payments|purchases)/))]"
+    then:
+      field: delete
+      function: falsy
+
+  # --- Conventions JSON -----------------------------------------------------
+  studrp-camel-case-properties:
+    description: Champs JSON en camelCase.
+    severity: error
+    given: "$..properties[*]~"
+    then:
+      function: casing
+      functionOptions:
+        type: camel
+
+  studrp-money-in-cents:
+    description: Les montants sont des entiers en centimes, suffixés Cents.
+    message: "Montant « {{property}} » : renommer en …Cents (entier en centimes)."
+    severity: error
+    given: "$..properties[?(@property.match(/(amount|price|total|balance|fee|salary|bonus|limit)$/i) && (@.type == 'integer' || @.type == 'number'))]~"
+    then:
+      function: falsy
+
+  studrp-errors-problem-json:
+    description: Toute erreur 4xx/5xx est au format RFC 9457 (application/problem+json).
+    severity: error
+    given: "$.paths[*][*].responses[?(@property.match(/^[45]/))].content"
+    then:
+      field: application/problem+json
+      function: truthy
+
+overrides:
+  - files: ["contracts/gateway.openapi.yaml"]
+    rules:
+      studrp-path-prefix: "off"
